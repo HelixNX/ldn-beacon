@@ -35,14 +35,17 @@ void host_advert(const HostSession *s, const LdnNetworkInfo *n, const u8 bssid[6
     }
 }
 
-static void hdr(Wr *w, u8 subtype, const u8 bssid[6], u16 seq) {
-    static const u8 bcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+static const u8 bcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
+/* addr3: the BSSID in beacons; the advertisement has the wildcard BSSID there (as a Switch sends it: a station
+ * that is not in our network drops action frames naming another BSS) */
+static void hdr(Wr *w, u8 subtype, const u8 bssid[6], const u8 addr3[6], u16 seq) {
     wr_u8(w, (u8)(subtype << 4));               /* management */
     wr_u8(w, 0);
     wr_zero(w, 2);                              /* duration */
     wr_bytes(w, bcast, 6);
     wr_bytes(w, bssid, 6);
-    wr_bytes(w, bssid, 6);
+    wr_bytes(w, addr3, 6);
     u16 sc = (u16)(seq << 4);
     wr_u8(w, (u8)sc);                           /* sequence control, little-endian */
     wr_u8(w, (u8)(sc >> 8));
@@ -52,7 +55,7 @@ static void ie(Wr *w, u8 id, const void *p, u8 n) { wr_u8(w, id); wr_u8(w, n); w
 
 size_t frame_beacon(u8 *out, size_t cap, const u8 bssid[6], u16 seq, u64 tsf_us, u8 channel) {
     Wr w = wr_init(out, cap);
-    hdr(&w, 8, bssid, seq);
+    hdr(&w, 8, bssid, bssid, seq);
     for (int i = 0; i < 8; i++) wr_u8(&w, (u8)(tsf_us >> (8 * i)));    /* timestamp, little-endian */
     wr_u8(&w, 100); wr_u8(&w, 0);               /* beacon interval 100 TU */
     wr_u8(&w, 0x11); wr_u8(&w, 0x04);           /* capabilities: ESS, privacy, short slot time */
@@ -92,7 +95,7 @@ size_t frame_beacon(u8 *out, size_t cap, const u8 bssid[6], u16 seq, u64 tsf_us,
 
 size_t frame_advert(u8 *out, size_t cap, const LdnKeys *k, const LdnAdvert *a, const u8 bssid[6], u16 seq) {
     Wr w = wr_init(out, cap);
-    hdr(&w, 13, bssid, seq);                    /* action */
+    hdr(&w, 13, bssid, bcast, seq);             /* action */
     if (w.err) return 0;
     size_t n = adv_encode(k, a, out + w.off, cap - w.off);
     return n ? w.off + n : 0;

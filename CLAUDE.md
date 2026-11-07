@@ -114,6 +114,11 @@ Captures (`captures/<date>/`, git-ignored; `scripts/capture.sh` makes them, `rad
 Stage 1 written 2026-11-06 (ldnbeacon): our frames checked on Windows (frametest -> advdump; the beacon's elements
 equal the Switch's but the channel); not yet run on the laptop (now a fresh CachyOS ISO). Test: room server on the
 PC, the recomp hosting a raid in it, `sudo ./build/ldnbeacon --room <PC>:24872`, the Switch searches by link code.
+Runs 2026-11-06 (Union Circle, the Switch searching by code): our beacon is on the air (the PC's Wi-Fi lists BSSID
+<the card's MAC> on 2.4 GHz; mt7925e reports no injected frames back to the monitor interface), but the Switch did
+not find it, sent no probe requests with Nintendo's element and nothing to our BSSID (a 68 s recording on channel 6,
+`captures/20261106-beacon-run3/`): it scans passively. Our advertisement had our BSSID as addr3; a Switch sends it
+with the wildcard BSSID (ff:ff:ff:ff:ff:ff): fixed, now header-for-header as the Switch's. Next run: channel 6, then 11.
 If the Switch lists nothing: it may scan actively (probe requests in the log; answer them), or the card may refuse
 injection on mon0 (status line: frames sent / failed).
 
