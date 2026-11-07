@@ -242,6 +242,18 @@ node's 169.254.X.(i+1); air -> room: our room address) and logs the first few an
 is a Net (0x2C) message. Still possible after this: Pia's LDN constant id comes from the MAC (Pia-Types), and the MACs
 differ between the sides (the host: 02:00:c0:a8:01:02 in the room, our BSSID on the air; the Switch: its own on the
 air, 02:00:c0:a8:01:03 in the room); if Pia checks them, the BSSID could take the host's room MAC.
+Run 15 (`captures/20261107-beacon-run15/`, Pia re-addressed): two joins, left at 4.5 s again; the host's packets
+on the air authenticate as from 169.254.50.1 (piatest: 18 of 18), but **the messages carry room addresses**: the
+host's Net (0x2C) message, message flags 0x31 (0x20: zlib, a 4 KB window), inflates to a station list with the host's
+constant id c00102a800020000 (from 02:00:c0:a8:01:02), the network id, and StationAddresses 192.168.1.2:12345 (the
+host) and 192.168.1.3:12345 (the slot for the joining station: our room address), so the Switch (169.254.50.2) does
+not find itself. Message format (5.27-6.30) as the wiki has it: u8 field flags (1 message flags, 2 u16 size, 4 u8
+protocol + u24 port, 8 u64 destination; absent fields from the previous message; upper bits seen set, no fields),
+payload, padded to 4; 0xFF pads the messages to 16. Now `pia_rewrite` (pia.c, zlib) inflates compressed payloads,
+replaces every node's IPv4 and MAC-made constant id with the other side's (room -> air: node i's room address and
+room MAC -> 169.254.X.(i+1) and the air's MAC: the host's is our BSSID, ours the Switch's real one; air -> room the
+reverse), deflates, writes every message's fields out and re-encrypts; piatest's round trip on run 15's packet: 3
+replaced, 108 -> 108 bytes, decrypts as from 169.254.50.1. zlib: vcpkg (Windows), pacman `zlib` (in RUN.txt).
 If the Switch lists nothing: it may scan actively (probe requests in the log; answer them), or the card may refuse
 injection on mon0 (status line: frames sent / failed).
 

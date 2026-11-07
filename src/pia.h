@@ -43,4 +43,24 @@ bool pia_is_packet(const u8 *p, size_t n);          /* magic, version byte with 
 bool pia_decrypt(const PiaNet *net, const PiaVariant *v, u32 src_ip, u8 *p, size_t n);
 void pia_encrypt(const PiaNet *net, const PiaVariant *v, u32 src_ip, u8 *p, size_t n);
 
+/* Addresses inside the messages (run 15): the host's Net (0x2C) message, zlib-compressed (message flag 0x20), lists
+ * the stations by StationAddress (16-byte address, IPv4 in the first 4, u16 port) and the host's constant id, which
+ * Pia makes from the MAC (Pia-Types: mac[2], mac[4], mac[5], mac[3], mac[1], mac[0], 0, 0). Crossing sides they must
+ * become the other side's: PiaMap pairs (big-endian in the payload). */
+typedef struct PiaMap {
+    int n;
+    u32 from_ip[8], to_ip[8];
+    u64 from_cid[8], to_cid[8];
+} PiaMap;
+u64 pia_constant_id(const u8 mac[6]);
+void pia_map_add(PiaMap *m, u32 from_ip, u32 to_ip, const u8 from_mac[6], const u8 to_mac[6]);
+
+/* in: a decrypted packet (header, messages, 0xFF padding, footer). Writes the packet with every message's payload
+ * rewritten by m (compressed ones inflated, rewritten, deflated again) and every message's fields written out, padded
+ * to 16 with 0xFF, the footer copied; returns its size, 0 when the messages do not parse. *replaced counts the
+ * addresses / ids replaced. Encrypt the result again with pia_encrypt. */
+size_t pia_rewrite(const u8 *in, size_t n, u8 *out, size_t cap, const PiaMap *m, unsigned *replaced);
+/* prints the messages of a decrypted packet (inflated), for piatest */
+void pia_dump(const u8 *p, size_t n);
+
 #endif

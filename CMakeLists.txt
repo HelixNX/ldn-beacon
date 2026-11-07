@@ -1,7 +1,7 @@
 # ldn-beacon: a real Switch's local play (LDN over Wi-Fi) bridged into an Eden-compatible multiplayer room.
-#   Linux (the beacon, CachyOS):  sudo pacman -Sy --needed base-devel cmake enet zstd iw
+#   Linux (the beacon, CachyOS):  sudo pacman -Sy --needed base-devel cmake enet zstd zlib iw
 #                                 cmake -B build && cmake --build build
-#   Windows (no ldnbeacon):       vcpkg install enet zstd; cmake -G Ninja -B build -DCMAKE_C_COMPILER=clang-cl
+#   Windows (no ldnbeacon):       vcpkg install enet zstd zlib; cmake -G Ninja -B build -DCMAKE_C_COMPILER=clang-cl
 #                                 (VCPKG_ROOT, or -DVCPKG_INSTALLED=<vcpkg>/installed/x64-windows)
 cmake_minimum_required(VERSION 3.20)
 project(ldn_beacon C)
@@ -20,6 +20,8 @@ if(WIN32)
     find_library(ENET_LIB enet HINTS "${VCPKG_INSTALLED}/lib" REQUIRED)
     find_path(ZSTD_INCLUDE zstd.h HINTS "${VCPKG_INSTALLED}/include" REQUIRED)
     find_library(ZSTD_LIB zstd HINTS "${VCPKG_INSTALLED}/lib" REQUIRED)
+    find_path(ZLIB_INCLUDE zlib.h HINTS "${VCPKG_INSTALLED}/include" REQUIRED)
+    find_library(ZLIB_LIB zlib HINTS "${VCPKG_INSTALLED}/lib" REQUIRED)
     set(PLATFORM_LIBS ws2_32 winmm)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 else()
@@ -27,13 +29,16 @@ else()
     find_library(ENET_LIB enet REQUIRED)
     find_path(ZSTD_INCLUDE zstd.h REQUIRED)
     find_library(ZSTD_LIB zstd REQUIRED)
+    find_path(ZLIB_INCLUDE zlib.h REQUIRED)
+    find_library(ZLIB_LIB z REQUIRED)
     set(PLATFORM_LIBS)
     add_compile_options(-Wall -Wextra)
 endif()
 
-# LDN itself (crypto, keys, the advertisement), no network libraries: builds anywhere
+# LDN itself (crypto, keys, the advertisement, Pia; zlib for Pia's compressed messages), no network libraries
 add_library(ldncore STATIC src/common.c src/crypto.c src/ldnkeys.c src/adv.c src/frames.c src/ccmp.c src/ldnauth.c src/bridge.c src/pia.c)
-target_include_directories(ldncore PUBLIC src)
+target_include_directories(ldncore PUBLIC src "${ZLIB_INCLUDE}")
+target_link_libraries(ldncore PUBLIC "${ZLIB_LIB}")
 
 add_executable(advdump src/advdump.c)
 target_link_libraries(advdump PRIVATE ldncore)
@@ -64,10 +69,10 @@ endif()
 
 if(WIN32)
     # vcpkg's DLLs next to the exe
-    foreach(_dll enet zstd)
+    foreach(_dll enet zstd zlib1)
         if(EXISTS "${VCPKG_INSTALLED}/bin/${_dll}.dll")
-            add_custom_command(TARGET roomtest POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                               "${VCPKG_INSTALLED}/bin/${_dll}.dll" "$<TARGET_FILE_DIR:roomtest>")
+            add_custom_command(TARGET piatest POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                               "${VCPKG_INSTALLED}/bin/${_dll}.dll" "$<TARGET_FILE_DIR:piatest>")
         endif()
     endforeach()
 endif()

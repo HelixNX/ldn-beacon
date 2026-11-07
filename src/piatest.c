@@ -2,7 +2,10 @@
  * Pia packets in a beacon capture: CCMP-decrypts the data frames with the network's data key, takes UDP payloads
  * starting with Pia's magic, and tries every SSID candidate x source address x PiaVariant.
  *   piatest capture.pcap data-key-hex game-key(16 chars) [ip:a.b.c.d]... [hex:32 hex digits | str:text]...
- * ip: the address the sender encrypted with (default: the packet's source); str: the first 16 bytes, zero-padded. */
+ *           [map:a.b.c.d=e.f.g.h,mac=mac]... [as:a.b.c.d]
+ * ip: the address the sender encrypted with (default: the packet's source); str: the first 16 bytes, zero-padded.
+ * map / as: rewrite the first packet's messages with these address and MAC pairs (pia_rewrite), encrypt it as from
+ * the "as" address, check that it decrypts again, and print the messages before and after. */
 #include "ccmp.h"
 #include "pia.h"
 #include <stdlib.h>
@@ -46,11 +49,22 @@ int main(int argc, char **argv) {
     memcpy(gkey, argv[3], 16);
     u8 ssid[16][16];
     char ssid_name[16][64];
-    u32 ips[8];
+    u32 ips[8], as_ip = 0;
     int nssid = 0, nip = 0;
+    PiaMap map = {0};
     for (int i = 4; i < argc; i++) {
         unsigned a, b, c, d;
-        if (!strncmp(argv[i], "ip:", 3) && sscanf(argv[i] + 3, "%u.%u.%u.%u", &a, &b, &c, &d) == 4 && nip < 8)
+        unsigned e, g, h, j, m1[6], m2[6];
+        if (!strncmp(argv[i], "map:", 4) &&
+            sscanf(argv[i] + 4, "%u.%u.%u.%u=%u.%u.%u.%u,%x:%x:%x:%x:%x:%x=%x:%x:%x:%x:%x:%x", &a, &b, &c, &d, &e, &g,
+                   &h, &j, &m1[0], &m1[1], &m1[2], &m1[3], &m1[4], &m1[5], &m2[0], &m2[1], &m2[2], &m2[3], &m2[4],
+                   &m2[5]) == 20) {
+            u8 x[6], y[6];
+            for (int k = 0; k < 6; k++) { x[k] = (u8)m1[k]; y[k] = (u8)m2[k]; }
+            pia_map_add(&map, a << 24 | b << 16 | c << 8 | d, e << 24 | g << 16 | h << 8 | j, x, y);
+        } else if (!strncmp(argv[i], "as:", 3) && sscanf(argv[i] + 3, "%u.%u.%u.%u", &a, &b, &c, &d) == 4)
+            as_ip = a << 24 | b << 16 | c << 8 | d;
+        else if (!strncmp(argv[i], "ip:", 3) && sscanf(argv[i] + 3, "%u.%u.%u.%u", &a, &b, &c, &d) == 4 && nip < 8)
             ips[nip++] = a << 24 | b << 16 | c << 8 | d;
         else if (!strncmp(argv[i], "hex:", 4) && nssid < 16 && unhex(argv[i] + 4, ssid[nssid], 16))
             snprintf(ssid_name[nssid++], 64, "%s", argv[i]);
@@ -125,9 +139,24 @@ int main(int argc, char **argv) {
                        v.ip_le ? "LE" : "BE", v.aad, good, npk);
                 memcpy(b, pk[0].p, pk[0].n);
                 pia_decrypt(&net, &v, ips[ii], b, pk[0].n);
-                printf("  first packet's messages:");
-                for (size_t k = PIA_HDR; k < pk[0].n; k++) printf("%s%02x", (k - PIA_HDR) % 32 ? "" : "\n    ", b[k]);
-                printf("\n");
+                printf("  first packet's messages:\n");
+                pia_dump(b, pk[0].n);
+                if (map.n && as_ip) {
+                    static u8 w[2048];
+                    unsigned rep = 0;
+                    size_t wn = pia_rewrite(b, pk[0].n, w, sizeof w, &map, &rep);
+                    if (!wn) printf("  rewrite: the messages do not parse\n");
+                    else {
+                        pia_encrypt(&net, &v, as_ip, w, wn);
+                        bool back = pia_decrypt(&net, &v, as_ip, w, wn);
+                        printf("  rewritten: %u replaced, %zu -> %zu bytes, encrypted as from %u.%u.%u.%u: %s\n", rep,
+                               pk[0].n, wn, as_ip >> 24, as_ip >> 16 & 255, as_ip >> 8 & 255, as_ip & 255,
+                               back ? "decrypts again" : "DOES NOT DECRYPT");
+                        if (back) pia_dump(w, wn);
+                    }
+                    memcpy(b, pk[0].p, pk[0].n);
+                    pia_decrypt(&net, &v, ips[ii], b, pk[0].n);
+                }
                 /* re-encrypting must give the packet back */
                 pia_encrypt(&net, &v, ips[ii], b, pk[0].n);
                 printf("  re-encrypted: %s\n", memcmp(b, pk[0].p, pk[0].n) ? "DIFFERS" : "identical");
