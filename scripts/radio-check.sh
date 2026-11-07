@@ -23,17 +23,29 @@ sed -n '/valid interface combinations/,/^[[:space:]]*$/p' "$OUT/iw-list.txt"
 echo "--- frames it can send from an AP interface (look for 0x00d0: action)"
 sed -n '/Supported TX frame types/,/Supported RX frame types/p' "$OUT/iw-list.txt" | grep -A1 -i ' AP:'
 
+command -v tcpdump >/dev/null || { echo "tcpdump is not installed (sudo pacman -Sy --needed tcpdump)"; exit 1; }
+command -v rfkill >/dev/null && rfkill unblock wifi
 command -v nmcli >/dev/null && nmcli device set "$IF" managed no
 ip link set "$IF" down
 iw dev "$IF" set type monitor || { echo "monitor mode refused"; exit 1; }
-ip link set "$IF" up
+ip link set "$IF" up || { echo "the interface would not come up in monitor mode"; exit 1; }
+echo "--- monitor mode:"
+iw dev "$IF" info | grep -E 'type|channel'
 for CH in 1 6 11; do
     iw dev "$IF" set channel "$CH" || { echo "channel $CH refused"; continue; }
     echo "--- channel $CH, $SECS s: host local play on the Switch now"
-    timeout "$SECS" tcpdump -i "$IF" -w "$OUT/ch$CH.pcap" 2>/dev/null
+    START=$(date +%s)
+    timeout "$SECS" tcpdump -i "$IF" -w "$OUT/ch$CH.pcap" 2> "$OUT/ch$CH.err"
+    RC=$?
+    TOOK=$(( $(date +%s) - START ))
+    if [ "$TOOK" -lt $((SECS - 2)) ]; then
+        echo "    tcpdump stopped after $TOOK s (exit $RC):"
+        sed 's/^/      /' "$OUT/ch$CH.err"
+    fi
+    ALL=$(tcpdump -r "$OUT/ch$CH.pcap" 2>/dev/null | wc -l)
     N=$(tcpdump -r "$OUT/ch$CH.pcap" -e 2>/dev/null | grep -ci 'action')
     NN=$(tcpdump -r "$OUT/ch$CH.pcap" -x 2>/dev/null | grep -ci '0022 aa\|0022aa\|00 22 aa')
-    echo "    action frames: $N, with Nintendo's OUI (rough count): $NN"
+    echo "    frames: $ALL, action frames: $N, with Nintendo's OUI (rough count): $NN"
 done
 ip link set "$IF" down
 iw dev "$IF" set type managed
