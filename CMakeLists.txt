@@ -1,8 +1,10 @@
 # ldn-beacon: a real Switch's local play (LDN over Wi-Fi) bridged into an Eden-compatible multiplayer room.
 #   Linux (the beacon, CachyOS):  sudo pacman -Sy --needed base-devel cmake enet zstd zlib iw
 #                                 cmake -B build && cmake --build build
-#   Windows (no ldnbeacon):       vcpkg install enet zstd zlib; cmake -G Ninja -B build -DCMAKE_C_COMPILER=clang-cl
+#   Windows (ldnbeacon with the ESP32-S3 radio, s3/): vcpkg install enet zstd zlib; build.bat, or
+#                                 cmake -G Ninja -B build -DCMAKE_C_COMPILER=clang-cl
 #                                 (VCPKG_ROOT, or -DVCPKG_INSTALLED=<vcpkg>/installed/x64-windows)
+#   The S3's firmware (s3/) builds with ESP-IDF's idf.py, not from here.
 cmake_minimum_required(VERSION 3.20)
 project(ldn_beacon C)
 set(CMAKE_C_STANDARD 11)
@@ -52,6 +54,7 @@ add_executable(piatest src/piatest.c)
 target_link_libraries(piatest PRIVATE ldncore)
 add_executable(bridgetest src/bridgetest.c)
 target_link_libraries(bridgetest PRIVATE ldncore)
+add_executable(s3prototest src/s3prototest.c src/s3proto.c)
 
 add_library(room STATIC src/room.c)
 target_link_libraries(room PUBLIC ldncore)
@@ -61,10 +64,20 @@ target_link_libraries(room PUBLIC "${ENET_LIB}" "${ZSTD_LIB}" ${PLATFORM_LIBS})
 add_executable(roomtest src/roomtest.c)
 target_link_libraries(roomtest PRIVATE room)
 
+# the beacon itself, Windows or Linux: radio.h, the ESP32-S3 anywhere (radio_s3.c), the built-in card on Linux (mon0 + hostapd)
+add_executable(ldnbeacon src/ldnbeacon.c src/radio.c src/radio_s3.c src/s3proto.c)
+target_link_libraries(ldnbeacon PRIVATE room)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    # the beacon itself: a monitor interface and raw 802.11 frames (radio.c)
-    add_executable(ldnbeacon src/ldnbeacon.c src/radio.c src/ap.c)
-    target_link_libraries(ldnbeacon PRIVATE room)
+    target_sources(ldnbeacon PRIVATE src/radio_linux.c src/ap.c)
+endif()
+add_executable(s3test src/s3test.c src/radio.c src/radio_s3.c src/s3proto.c)
+target_link_libraries(s3test PRIVATE ldncore)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_sources(s3test PRIVATE src/radio_linux.c src/ap.c)
+endif()
+if(WIN32)
+    target_link_libraries(ldnbeacon PRIVATE setupapi advapi32)
+    target_link_libraries(s3test PRIVATE setupapi advapi32)
 endif()
 
 if(WIN32)

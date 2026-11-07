@@ -1,17 +1,19 @@
-/* ldnbeacon (Linux): joins a room, finds the network a member hosts (LDN Scan -> ScanResp) and hosts it on the air
+/* ldnbeacon (Windows or Linux): joins a room, finds the network a member hosts (LDN Scan -> ScanResp) and hosts it on the air
  * as a Switch would: a beacon and the LDN advertisement every 100 ms. Stage 1: a real Switch searching for local
  * play (e.g. a raid's link code) should list the room's network; joining it is not handled yet. What the radio hears
  * that concerns us (probe requests, authentication / association to our BSSID, other consoles' advertisements) is
  * logged, as a preview of stage 2.
- *   sudo ./ldnbeacon --room host[:port] [--iface wlan0] [--channel 1|6|11] [--nick name] [--password pw]
- *                    [-k keyfile]... [--pcap file] [--no-ap] [--psk-mode 0-2] [--hostapd-log file] [--resp-flags n]
- *                    [--bcast-mode 0-2] [--log 0-2]
+ *   ldnbeacon --room host[:port] [--radio s3[:port] | wifi[:iface]] [--channel 1|6|11] [--nick name]
+ *                    [--password pw] [-k keyfile]... [--pcap file] [--no-ap] [--psk-mode 0-2] [--hostapd-log file]
+ *                    [--s3-open] [--resp-flags n] [--bcast-mode 0-2] [--log 0-2]
+ * The radio (radio.h): s3, an ESP32-S3 with s3/ flashed on USB (Windows and Linux; its SoftAP takes hostapd's part,
+ * --s3-open makes it an open AP instead of WPA2), or wifi, the machine's own card (Linux only: mon0 + hostapd).
+ * Default: the S3 when one is plugged in, else the built-in Wi-Fi. --iface x is --radio wifi:x.
  * Stage 2 (default): hostapd runs the network on the Wi-Fi interface (ACKs, authentication, association, WPA2; see
  * ap.h) and mon0 only injects the advertisements; --no-ap is stage 1 (beacons and probe responses injected too).
  * The WPA2 key is a guess (--psk-mode, ap.h); hostapd's debug log and --pcap capture the handshake either way.
  * --pcap saves every frame heard (radiotap, for Wireshark / analysis elsewhere).
  * Key files default to ../keys/prod.keys and ../keys/ldn.txt (run from ldn-beacon/). Ctrl+C gives Wi-Fi back. */
-#include "ap.h"
 #include "bridge.h"
 #include "ccmp.h"
 #include "frames.h"
@@ -21,7 +23,9 @@
 #include "room.h"
 #include <signal.h>
 #include <stdlib.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 
 static volatile sig_atomic_t quit;
 static void on_signal(int s) { (void)s; quit = 1; }
@@ -154,19 +158,22 @@ static void station_leave(const char *why) {
 
 /* an LDN frame (from the OUI on) to one station: LLC/SNAP + EtherType 0x88B7, CCMP, QoS data from the AP */
 static bool send_ldn_frame(const u8 dest[6], const u8 *p, size_t n) {
+    if (radio.hw_crypto) return radio_send_eth(&radio, dest, radio.mac, LDN_ETHERTYPE, p, n);
     static u8 body[2048], fr[2200];
     static const u8 llc[8] = {0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00, 0x88, 0xB7};
     if (n + 8 > sizeof body) return false;
     memcpy(body, llc, 8);
     memcpy(body + 8, p, n);
-    u8 hdr[26] = {0x88, 0x02};                          /* QoS data, FromDS */
+    /* QoS data, FromDS (as on the laptop since run 8); the S3 sends only non-QoS data (kinnay's host sends that) */
+    u8 hdr[26] = {radio.qos_data ? 0x88 : 0x08, 0x02};
+    size_t hl = radio.qos_data ? 26 : 24;
     memcpy(hdr + 4, dest, 6);
     memcpy(hdr + 10, radio.mac, 6);
     memcpy(hdr + 16, radio.mac, 6);
     u16 sc = (u16)((seq++ & 0xFFF) << 4);
     hdr[22] = (u8)sc;
     hdr[23] = (u8)(sc >> 8);
-    size_t k = ccmp_encrypt(net.data_key, hdr, 26, body, n + 8, ++tx_pn, 0, fr, sizeof fr);
+    size_t k = ccmp_encrypt(net.data_key, hdr, hl, body, n + 8, ++tx_pn, 0, fr, sizeof fr);
     return k && radio_send_ex(&radio, fr, k, true, true);
 }
 
@@ -221,12 +228,24 @@ static void handle_ldn(const u8 *p, size_t n, const u8 src[6]) {
 }
 
 static void from_switch(u16 et, const u8 *p, size_t n, const u8 src_mac[6]);
+static void handle_llc(const u8 *pl, size_t n, const u8 src[6]);
 
 /* a protected data frame to us: decrypt with the network's key */
 static void handle_data(const u8 *f, size_t n, const u8 src[6]) {
     static u8 pl[4096];
     size_t pn_len;
     u64 pn;
+    /* the S3 holds the key and decrypts in hardware: its promiscuous frames then keep the Protected bit, the CCMP
+     * header and the MIC, with the body already plain (S3 run 2, 2026-11-07: LLC/SNAP right after the CCMP header) */
+    size_t h = (f[0] & 0x80) ? 26 : 24;
+    if (radio.hw_crypto && n >= h + 8 + 8 + 8 && f[h + 8] == 0xAA && f[h + 9] == 0xAA && f[h + 10] == 0x03) {
+        static unsigned hw;
+        if (!hw++) logf_(0, "air: data from " MAC_FMT " arrives decrypted by the radio (CCMP header and MIC kept)",
+                         MAC_ARG(src));
+        cnt_decrypted++;
+        handle_llc(f + h + 8, n - h - 8 - 8, src);
+        return;
+    }
     if (n > sizeof pl || (!ccmp_decrypt(net.data_key, f, n, pl, &pn_len, &pn) &&
                           !(n > 4 && ccmp_decrypt(net.data_key, f, n - 4, pl, &pn_len, &pn)))) {
         if (!cnt_undecryptable++)
@@ -234,10 +253,15 @@ static void handle_data(const u8 *f, size_t n, const u8 src[6]) {
         return;
     }
     if (!cnt_decrypted++) logf_(0, "air: encrypted data from " MAC_FMT " decrypts with the network's key", MAC_ARG(src));
-    if (pn_len < 8 || pl[0] != 0xAA || pl[1] != 0xAA || pl[2] != 0x03) return;
+    handle_llc(pl, pn_len, src);
+}
+
+/* a decrypted body: LLC/SNAP, EtherType, payload */
+static void handle_llc(const u8 *pl, size_t n, const u8 src[6]) {
+    if (n < 8 || pl[0] != 0xAA || pl[1] != 0xAA || pl[2] != 0x03) return;
     u16 et = (u16)(pl[6] << 8 | pl[7]);
-    if (et == LDN_ETHERTYPE) { handle_ldn(pl + 8, pn_len - 8, src); return; }
-    if (et == ETHERTYPE_IPV4 || et == ETHERTYPE_ARP) { from_switch(et, pl + 8, pn_len - 8, src); return; }
+    if (et == LDN_ETHERTYPE) { handle_ldn(pl + 8, n - 8, src); return; }
+    if (et == ETHERTYPE_IPV4 || et == ETHERTYPE_ARP) { from_switch(et, pl + 8, n - 8, src); return; }
     cnt_other_data++;                                   /* IPv6 and the like: the console's own, not the game's */
 }
 
@@ -327,6 +351,7 @@ static void pia_build_map(PiaMap *m, bool to_air) {
 /* an Ethernet-style frame to the Switch (or everyone): LLC/SNAP + ethertype, CCMP (key index 0 unicast, 1 group),
  * data from the AP (FromDS) with src as the source address */
 static bool send_data_frame(const u8 dest[6], const u8 src[6], u16 ethertype, const u8 *p, size_t n) {
+    if (radio.hw_crypto) return radio_send_eth(&radio, dest, src, ethertype, p, n);
     static u8 body[2048], fr[2200];
     if (n + 8 > sizeof body) return false;
     static const u8 llc[6] = {0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00};
@@ -480,6 +505,11 @@ static void on_frame(const u8 *f, size_t n, const u8 bssid[6]) {
         if (n >= h + 8 && f[h] == 0xAA && f[h + 1] == 0xAA && f[h + 6] == 0x88 && f[h + 7] == 0x8E) {
             cnt_eapol++;
             logf_(0, "air: EAPOL (WPA2 handshake) from " MAC_FMT ", %zu bytes", MAC_ARG(a2), n);
+        } else if (radio.hw_crypto && net.have && n > h) {
+            /* the S3 holds the key: its promiscuous receive may give the Switch's frames already decrypted */
+            static unsigned plain;
+            if (!plain++) logf_(0, "air: data from " MAC_FMT " arrives decrypted (the radio's key)", MAC_ARG(a2));
+            handle_llc(f + h, n - h, a2);
         }
         return;
     }
@@ -499,9 +529,9 @@ static void on_frame(const u8 *f, size_t n, const u8 bssid[6]) {
             host_ssid(&net.session, ssid);
             if (!memcmp(f + 26, ssid, 32)) {
                 cnt_probe_ours++;
-                if (use_ap) {                               /* hostapd answers */
+                if (use_ap) {                               /* the AP answers */
                     if (first_time(seen_ours, &nseen_ours, a2))
-                        logf_(0, "air: " MAC_FMT " asks for our network by name (hostapd answers)", MAC_ARG(a2));
+                        logf_(0, "air: " MAC_FMT " asks for our network by name (the AP answers)", MAC_ARG(a2));
                     return;
                 }
                 u8 fr[FRAME_MAX];
@@ -536,7 +566,7 @@ static void on_frame(const u8 *f, size_t n, const u8 bssid[6]) {
         if (sub == 11) cnt_auth++; else cnt_assoc++;
         if (!use_ap || cnt_auth + cnt_assoc <= 20)
             logf_(0, "air: %s from " MAC_FMT " to us (%zu bytes)%s", sub == 11 ? "authentication" : "association request",
-                  MAC_ARG(a2), n, use_ap ? " (hostapd answers)" : ": the Switch tries to join (not handled yet)");
+                  MAC_ARG(a2), n, use_ap ? " (the AP answers)" : ": the Switch tries to join (not handled yet)");
     } else if (sub == 13 && n >= 24 + 6 && f[24] == 0x7F && f[25] == 0x00 && f[26] == 0x22 && f[27] == 0xAA) {
         cnt_adv_other++;
         if (first_time(seen_adv, &nseen_adv, a2))
@@ -544,12 +574,22 @@ static void on_frame(const u8 *f, size_t n, const u8 bssid[6]) {
     }
 }
 
+/* the S3's AP took or dropped a station (hostapd's own decisions show only in its log) */
+static void on_station(const u8 mac[6], bool joined, u16 reason) {
+    if (joined || !sta.active || memcmp(mac, sta.mac, 6)) return;
+    char why[64];
+    snprintf(why, sizeof why, "the S3's AP dropped it, reason %u", reason);
+    station_leave(why);
+}
+
 /* ------------------------------------------------------------------------------------------------------------- */
 
 int main(int argc, char **argv) {
     RoomConfig c = {.port = 24872, .nick = "beacon", .game_name = "Pokemon Violet", .game_id = 0x01008F6008C5E000ull};
     char host[256] = "";
-    const char *iface = NULL, *keyfiles[8];
+    const char *radio_spec = NULL, *keyfiles[8];
+    char iface_spec[48];
+    bool s3_open = false;
     const char *pcap_path = NULL, *hostapd_log = "hostapd.log", *passphrase = "ldn_passphrase_scarlet_violet";
     int psk_mode = AP_PSK_HEX_PASSPHRASE;
     int nkeys = 0, channel = 6;
@@ -560,7 +600,12 @@ int main(int argc, char **argv) {
             char *colon = strrchr(host, ':');
             if (colon) { *colon = 0; c.port = (u16)atoi(colon + 1); }
             i++;
-        } else if (!strcmp(a, "--iface") && v) iface = v, i++;
+        } else if (!strcmp(a, "--iface") && v) {
+            snprintf(iface_spec, sizeof iface_spec, "wifi:%s", v);
+            radio_spec = iface_spec;
+            i++;
+        } else if (!strcmp(a, "--radio") && v) radio_spec = v, i++;
+        else if (!strcmp(a, "--s3-open")) s3_open = true;
         else if (!strcmp(a, "--channel") && v) channel = atoi(v), i++;
         else if (!strcmp(a, "--nick") && v) c.nick = v, i++;
         else if (!strcmp(a, "--password") && v) c.password = v, i++;
@@ -574,9 +619,9 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--resp-flags") && v) resp_flags_fixed = atoi(v), i++;
         else if (!strcmp(a, "--bcast-mode") && v) bcast_mode = atoi(v), i++;
         else {
-            fprintf(stderr, "usage: sudo ./ldnbeacon --room host[:port] [--iface wlan0] [--channel 1|6|11] "
+            fprintf(stderr, "usage: ldnbeacon --room host[:port] [--radio s3[:port] | wifi[:iface]] [--channel 1|6|11] "
                             "[--nick name] [--password pw] [-k keyfile]... [--pcap file] [--no-ap] [--psk-mode 0-2] [--hostapd-log file]\n"
-                            "       [--resp-flags n] [--bcast-mode 0-2] [--log 0-2]\n");
+                            "       [--s3-open] [--resp-flags n] [--bcast-mode 0-2] [--log 0-2]\n");
             return 2;
         }
     }
@@ -598,20 +643,27 @@ int main(int argc, char **argv) {
 
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
+#ifdef SIGHUP
     signal(SIGHUP, on_signal);
+#endif
     RoomHandlers h = {.ldn = on_ldn, .proxy = on_proxy};
     char err[256];
     if (!room_join(&c, &h, err, sizeof err)) { logf_(0, "ldnbeacon: %s", err); return 1; }
     channel_now = (u8)channel;
-    if (!radio_open(&radio, iface, (u8)channel, err, sizeof err)) {
+    if (!radio_open(&radio, radio_spec, (u8)channel, pcap_path != NULL, err, sizeof err)) {
         logf_(0, "ldnbeacon: %s", err);
         room_leave();
         return 1;
     }
 
-    int ldn_fd = use_ap ? radio_eth_socket(&radio, 0x88B7) : -1;   /* the LDN authentication, after WPA2 */
-    if (use_ap && ldn_fd < 0) logf_(0, "ldnbeacon: no packet socket for EtherType 0x88B7");
-    Ap ap = {0};
+    radio.on_station = on_station;
+    int ldn_fd = -1;
+#ifdef __linux__
+    if (use_ap && radio.kind == RADIO_WIFI) {                     /* the LDN authentication, after WPA2 */
+        ldn_fd = radio_eth_socket(&radio, 0x88B7);
+        if (ldn_fd < 0) logf_(0, "ldnbeacon: no packet socket for EtherType 0x88B7");
+    }
+#endif
     u8 ap_session[16] = {0};
     bool ap_tried = false;
     FILE *pcap = NULL;
@@ -647,6 +699,7 @@ int main(int argc, char **argv) {
             }
         }
 
+#ifdef __linux__
         if (ldn_fd >= 0) {
             static u8 eth[2048];
             size_t k;
@@ -658,6 +711,7 @@ int main(int argc, char **argv) {
                       k > m ? "..." : "");
             }
         }
+#endif
 
         t = now_ms();
         if (t - last_scan >= 1000) {                        /* ask the room who hosts */
@@ -677,24 +731,23 @@ int main(int argc, char **argv) {
         }
         if (net.have != on_air) {
             on_air = net.have;
-            if (on_air) logf_(0, "on the air: %s every 100 ms on channel %d", use_ap ? "advertisement (beacons: hostapd)" :
+            if (on_air) logf_(0, "on the air: %s every 100 ms on channel %d", use_ap ? "advertisement (beacons: the AP)" :
                               "beacon + advertisement", channel);
         }
-        if (use_ap) {                                       /* one hostapd per room session */
+        if (use_ap) {                                       /* one AP per room session */
             bool same = net.have && !memcmp(ap_session, net.session.session_id, 16);
-            if (ap.pid > 0 && (!net.have || !same)) ap_stop(&ap);
-            if (ap.pid > 0) ap_running(&ap);                /* exited: logged; not retried for this session */
+            bool ap_up = radio_ap_running(&radio);          /* hostapd exited: logged; not retried for this session */
+            if (ap_up && (!net.have || !same)) { radio_ap_stop(&radio); ap_up = false; }
             if (net.have && !same) {
                 memcpy(ap_session, net.session.session_id, 16);
                 ap_tried = false;
             }
-            if (net.have && ap.pid <= 0 && !ap_tried) {
+            if (net.have && !ap_up && !ap_tried) {
                 ap_tried = true;
-                char ssid[33];
-                u8 key[16];
-                host_ssid(&net.session, ssid);
-                ldn_data_key(&keys, net.session.server_random, key);
-                if (!ap_start(&ap, radio.iface, ssid, (u8)channel, key, psk_mode, hostapd_log, err, sizeof err))
+                ApConfig ac = {.channel = (u8)channel, .psk_mode = psk_mode, .open = s3_open, .log_path = hostapd_log};
+                host_ssid(&net.session, ac.ssid);
+                ldn_data_key(&keys, net.session.server_random, ac.data_key);
+                if (!radio_ap_start(&radio, &ac, err, sizeof err))
                     logf_(0, "ldnbeacon: %s", err);
             }
         }
@@ -777,8 +830,10 @@ int main(int argc, char **argv) {
         }
     }
     if (pcap) fclose(pcap);
-    ap_stop(&ap);
+    radio_ap_stop(&radio);
+#ifdef __linux__
     if (ldn_fd >= 0) close(ldn_fd);
+#endif
     radio_close(&radio);
     room_leave();
     return rc;

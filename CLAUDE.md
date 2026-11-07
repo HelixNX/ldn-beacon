@@ -24,17 +24,21 @@ Ryujinx are for behaviour only: our own implementation.
 | `src/advdump.c` | decrypts the advertisements in a pcap (radiotap or bare 802.11), prints them, checks re-encoding; any OS |
 | `src/frames.c` | stage 1: the beacon (a Switch's elements) and advertisement for a room network, with the values a console makes up (server random, auth token, nonce, 169.254.X subnet) |
 | `src/frametest.c` | writes those frames for a saved NetworkInfo as a pcap (advdump decodes it); any OS |
-| `src/radio.c` | Linux: mon0 next to the Wi-Fi interface (as capture.sh), services stopped and restored, raw 802.11 send / receive |
+| `src/radio.h`, `radio.c` | the radio, two kinds (`--radio s3[:port] \| wifi[:iface]`; default: an S3 if one is plugged in, else the built-in card; wifi is Linux only): raw 802.11 send / receive (radiotap in front for the pcap) and an AP for ACKs, authentication and association |
+| `src/radio_linux.c` | Linux: mon0 next to the Wi-Fi interface (as capture.sh), services stopped and restored |
 | `src/ap.c` | Linux: hostapd for the network (stage 2): hidden SSID as a Switch's, WPA2 with a guessed key (`--psk-mode`), Nintendo's element, debug log with keys |
+| `src/radio_s3.c` | any OS: the ESP32-S3 radio on a serial port (Windows: the first USB device with vendor id 303A; Linux: `/dev/serial/by-id/*Espressif*`); its log lines, station events and statistics go into ldnbeacon's log |
+| `src/s3proto.h`, `.c` | the S3 link: COBS-framed messages with CRC-16, shared with the firmware; s3prototest checks the framing |
+| `s3/` | the S3's firmware (ESP-IDF 5.3+, `idf.py build flash`): SoftAP (placeholder until the beacon names the network), promiscuous receive filtered to our BSSID / probes / Nintendo action frames, `esp_wifi_80211_tx`; console and ESP-IDF log on UART0, the log also forwarded over USB |
 | `src/ccmp.c` | CCMP (AES-CCM) in software: the Switch uses the data key directly, so no key is in the driver; ccmptest checks it against IEEE's vector and decrypts captures |
 | `src/ldnauth.c` | LDN authentication request parse / response build (challenge HMACs); authtest runs it on captured requests |
 | `src/bridge.c` | stage 3: IPv4 / UDP / ARP for the room <-> air bridge (checksums); bridgetest checks it |
-| `src/ldnbeacon.c` | Linux, the beacon: joins the room, Scans for a host, hosts its network on the air (advertisements on mon0, hostapd for association), answers the LDN authentication, joins the Switch to the room host, bridges its UDP (Pia re-addressed and rewritten); logs it all, compile time first |
+| `src/ldnbeacon.c` | the beacon (Linux with mon0 + hostapd, or any OS with the S3): joins the room, Scans for a host, hosts its network on the air (advertisements on mon0, hostapd for association), answers the LDN authentication, joins the Switch to the room host, bridges its UDP (Pia re-addressed and rewritten); logs it all, compile time first |
 | `src/pia.c` | Pia 6.x in LDN mode: CRC-32, AES-GCM (8-byte tag), session key and nonce, message parse / rewrite of addresses and constant ids (zlib) |
 | `src/piatest.c` | GCM against NIST's vector; finds the Pia variant that authenticates a capture's Pia packets; `map:` / `as:` round-trip a rewrite |
 | `src/roomtest.c` | joins a room, `--scan` broadcasts LDN Scans and prints the networks hosts answer with (`--dump dir`: their raw NetworkInfo); any OS |
 | `scripts/radio-check.sh` | first radio test on the laptop: card modes, a capture on channels 1 / 6 / 11 |
-| `build.bat` / `CMakeLists.txt` | `ldncore` (crypto, keys, advertisement; no network libraries), `room`, the tools. Windows (roomtest and advdump: clang-cl via `../nxrecomp/tools/vcenv.bat`, vcpkg enet zstd); Linux: `cmake -B build && cmake --build build` (pacman: base-devel cmake enet zstd) |
+| `build.bat` / `CMakeLists.txt` | `ldncore` (crypto, keys, advertisement; no network libraries), `room`, the tools. Windows (everything including ldnbeacon with the S3: clang-cl via `../nxrecomp/tools/vcenv.bat`, vcpkg enet zstd); Linux: `cmake -B build && cmake --build build` (pacman: base-devel cmake enet zstd) |
 
 Checked 2026-11-06: two roomtest clients in our room_server (192.168.1.1 / .2), Scans relayed.
 
@@ -269,16 +273,30 @@ BSSID), its ARP reply to .1 too: the beacon takes those already (on_frame, by IP
 If the Switch lists nothing: it may scan actively (probe requests in the log; answer them), or the card may refuse
 injection on mon0 (status line: frames sent / failed).
 
-**Where it stands (2026-11-07, after run 15):** room hosts, Switch joins: it finds the network, authenticates, takes
-its address, gets the host's Pia packets as direct frames, re-addressed and with the addresses inside rewritten (new,
-not yet run on the laptop). Next run: the Switch should answer (log: "addresses / constant ids inside replaced",
-"pia: air -> room", "bridge: air ... -> room") and stay past 4.5 s. Then, as they come: the rest of the raid's
-messages (join, lobby, battle), whatever else Pia checks against the MAC. Open: our injected group data frames do not
-reach the Switch (fine for one Switch); relayed frames from a third member (addr2 their MAC, as kinnay); nxrecomp's
-CreateNetwork should make a random security parameter as a console does (the beacon copies whatever the host has);
-the Switch hosting with the room joining (design item 2) is not started.
-Running it: `RUN.txt` at the stick's root: unzip with -DD, clean build, then ldnbeacon; results to the stick;
-saved here as `captures/<date>-beacon-runN/`. The zip carries `../keys/prod.keys` and `ldn.txt`.
+**Where it stands (2026-11-07, after S3 run 3):** the ESP32-S3 on the desktop is the antenna now (section "ESP32-S3
+as the antenna"); the laptop is only a fallback. Room hosts, Switch joins: it finds the network, associates,
+authenticates, takes its address, answers group and unicast ARP, and gets the host's Pia packets re-addressed with
+the addresses inside rewritten, but **sends no Pia (no IPv4 UDP) and leaves after ~4.6 s** (console "2318-0533").
+Next, in order:
+1. Run 16 (laptop, before the S3): beacon.log, beacon.pcap, build.log are still on the stick, not saved yet: copy
+   them to `captures/20261107-beacon-run16/` and read them (same story expected).
+2. The beacon should write what it sends into its pcap (the S3 cannot capture its own transmissions; with the S3 the
+   frames go out as Ethernet frames the hardware encrypts, so write them as plain data frames, marked).
+3. piatest on what goes to the Switch (room -> air) and on the host's room side: why does the Switch not take the
+   host's messages? Then, as they come: the raid's messages (join, lobby, battle), anything Pia checks against MACs.
+Open: relayed frames from a third member (addr2 their MAC, as kinnay); several Switches (one room member each; the
+S3's AP takes up to 8 here); nxrecomp's CreateNetwork should make a random security parameter as a console does
+(the beacon copies whatever the host has); the Switch hosting with the room joining (design item 2) is not started.
+Running it (S3, all on the desktop): the room server (`../pokemon-violet/build/room/room_server.exe --port 24872
+--name "LDN test" --game-id 01008F6008C5E000 --game "Pokemon Violet"`), then from ldn-beacon/
+`build/ldnbeacon.exe --room 127.0.0.1:24872 --channel 6 --pcap captures/<run>/beacon.pcap > captures/<run>/beacon.log
+2>&1` (finds the S3 by itself; `build.bat` builds it), then the user starts the game from pokemon-violet/
+(`$env:NX_ROOM='127.0.0.1:24872'; $env:NX_NICK='Host'; .\violetrecomp\run.ps1 -NoBuild`), hosts a raid with a link
+code and searches for it on the Switch. Firmware: in `s3/`, after the EIM profile
+(`. <IDF tools dir>\Microsoft.v5.5.6.PowerShell_profile.ps1`), `idf.py build` and `idf.py -p <port> flash` (stop
+ldnbeacon first: it holds the port). Bench without a Switch: `build/s3test [--ap] [--tx]`.
+Laptop runs (fallback): `RUN.txt` at the stick's root: unzip with -DD, clean build, then ldnbeacon; results to the
+stick; saved here as `captures/<date>-beacon-runN/`. The zip carries `../keys/prod.keys` and `ldn.txt`.
 
 ## Language (open question, for later)
 
@@ -287,10 +305,42 @@ later. For Rust: parsing frames anyone in radio range can send, as root; RustCry
 with nxrecomp (Rust would keep it through FFI), one toolchain, the hard parts are radio and protocol, not language.
 C meanwhile parses only through `src/rd.h`.
 
-## ESP32-S3 instead of a laptop (option, not started)
+## ESP32-S3 as the antenna (2026-11-07, the user's choice: no more walking to the laptop)
 
-The S3 (2.4 GHz 802.11n: channels 1 / 6 / 11 are what LDN uses) could be a dumb radio on USB to the desktop: the
-room client and translation run on the desktop, the S3 sends and receives 802.11 frames (esp_wifi_80211_tx for
-action frames, promiscuous mode for receiving, SoftAP with vendor IEs for the network). Unknowns: whether its
-SoftAP takes the LDN key as a raw PMK (its config takes a passphrase), and it has one station interface, so
-"Switch hosts" could carry one remote player at most. ESP-IDF is a new download (ask first).
+The user's ESP32-S3-DevKitC-1 on the desktop's native USB port (USB-Serial-JTAG, 303A:1001; it came with a
+TinyUSB firmware, 303A:4001) is a dumb radio; ldnbeacon runs on Windows next to the room server and does everything
+else, unchanged: the S3 stands in for mon0 (promiscuous receive, raw transmit) and hostapd (SoftAP: hardware ACKs,
+Open System authentication, association). ESP-IDF 5.5.6 installed by the user with Espressif's EIM (winget
+`Espressif.EIM-CLI`), outside the workspace. The beacon runs on Windows or Linux (the user, 2026-11-07: no Linux-only version any more); Windows has only the S3,
+Linux the S3 or the built-in card (`--radio wifi`, the laptop setup).
+Differences from the laptop: data frames go out as non-QoS data (`esp_wifi_80211_tx` takes no QoS data; kinnay's host
+sends non-QoS anyway); the S3 reports its AP's station events (a station it drops ends the stay in our log, with the
+reason); the SoftAP hides its SSID with a zero-length SSID element where a Switch sends 32 zero bytes.
+Bench, 2026-11-07 (`build/s3test`, no Switch): the S3 answers over USB, its hidden AP is on the air (the PC's Wi-Fi
+lists BSSID <the S3's MAC> on channel 6), promiscuous receive runs alongside the AP (~200 frames/s from the
+neighbours' networks, none dropped). `esp_wifi_80211_tx` sends action frames and plain data frames but **refuses any
+frame with the Protected bit** (ESP_ERR_INVALID_ARG), so the desktop cannot send frames it encrypted itself. Hence
+LDN mode in the firmware (`S3Ap.ldn`): linker `--wrap` of `wpa_auth_sta_associated` (ESP-IDF's AP authenticator
+would send 4-way message 1 four times and then deauthenticate) so no handshake starts; on association the data key
+goes into the hardware as the station's pairwise key (index 0) and the group key (index 1) and the station is
+authorized (`esp_wifi_wpa_ptk_init_done_internal`); the desktop sends Ethernet frames (`S3_TX_ETH`,
+`radio_send_eth`) and the S3 sends them as data from the AP, encrypted by the hardware with its own PN counter. Bench:
+Ethernet broadcast sent; unicast to a station not associated refused (0x3015), as it should be. Receiving stays raw
+(promiscuous, decrypted on the desktop; if the S3 hands over the Switch's frames already decrypted, ldnbeacon takes
+those too and logs it once).
+S3 runs with the Switch (2026-11-07, `captures/20261107-s3-run1..3/`, the recomp hosting a raid in a local room,
+channel 6):
+- Run 1: the Switch read the advertisement, probed by name, authenticated and associated with the S3, then sent
+  nothing we saw and left after 1.07 s (reason 3; on the console "2-ALZYA-0007"). With WPA2, ESP-IDF sends
+  WIFI_EVENT_AP_STACONNECTED only after the 4-way handshake, so the key was never installed, and the hardware's
+  failed decryptions were dropped by the firmware. Now the key is installed from a wrap of `hostap_new_assoc_sta`
+  (10 ms later, in a task), and frames flagged with a receive error are passed on (S3_RX_ERROR, counted).
+- Run 2: key installed 12 ms after association, authorized; the Switch's LDN requests (5, 200 ms apart) reached the
+  desktop but "did not decrypt": **with the key in the hardware, promiscuous frames come decrypted, still with the
+  Protected bit, the CCMP header and the MIC**. ldnbeacon takes those (LLC/SNAP right after the CCMP header).
+- Run 3: **the S3 path works end to end**: request answered, room Connect, the Switch listed with its MAC, the
+  host's Pia packets go to it (re-addressed and rewritten, as unicast frames), and **our group ARP probe was answered
+  (+500 ms): group frames reach the Switch now** (never on the MT7925). Then as in runs 13-15: the Switch sends only
+  its gratuitous ARP, ARP replies to .1 and IPv6 noise, **no IPv4 UDP**, and leaves after 4.66 s (reason 3; on the
+  console "2318-0533"). So the remaining problem is Pia, not the radio. Note: the S3 does not capture its own
+  transmissions, so our frames are not in the pcap.

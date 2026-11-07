@@ -6,13 +6,9 @@
 #ifndef AP_H
 #define AP_H
 
-#include "common.h"
+#include "radio.h"          /* AP_PSK_* */
 
 typedef struct Ap { int pid; } Ap;
-
-/* How the network's 16-byte data key becomes the WPA2 key (unknown yet, see CLAUDE.md):
- * 0 the key's 32 hex digits as the passphrase, 1 PSK = key twice, 2 PSK = key + 16 zero bytes */
-enum { AP_PSK_HEX_PASSPHRASE, AP_PSK_KEY_TWICE, AP_PSK_KEY_ZEROS, AP_PSK_MODES };
 
 bool ap_start(Ap *a, const char *iface, const char ssid[33], u8 channel, const u8 data_key[16], int psk_mode,
               const char *log_path, char *err, size_t errn);

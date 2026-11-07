@@ -1,0 +1,14 @@
+CONFIG_IDF_TARGET="esp32s3"
+# the USB-Serial-JTAG port carries our protocol only: the console (and ESP-IDF's log) goes to UART0, and the log is
+# also forwarded to the desktop as S3_LOG messages
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+CONFIG_FREERTOS_HZ=1000
+CONFIG_ESP_WIFI_NVS_ENABLED=n
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=16
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=64
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=64
+# no block ack sessions of our own: a Switch needs none from a host (kinnay's sends plain data frames)
+CONFIG_ESP_WIFI_AMPDU_TX_ENABLED=n
+CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=n
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
