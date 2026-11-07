@@ -254,6 +254,16 @@ replaces every node's IPv4 and MAC-made constant id with the other side's (room 
 room MAC -> 169.254.X.(i+1) and the air's MAC: the host's is our BSSID, ours the Switch's real one; air -> room the
 reverse), deflates, writes every message's fields out and re-encrypts; piatest's round trip on run 15's packet: 3
 replaced, 108 -> 108 bytes, decrypts as from 169.254.50.1. zlib: vcpkg (Windows), pacman `zlib` (in RUN.txt).
+kinnay's LDN library (`../ref/LDN`, GPLv3, cloned 2026-11-07: behaviour only, never copied), checked against our
+open points: its host's data frames are non-QoS data, FromDS, addr1 the destination, **addr2 the Ethernet source**
+(not the BSSID), addr3 the BSSID, CCMP with nonce priority 0 + addr2 + PN, one PN counter from 1, key index 1 for
+broadcast and 0 otherwise; the key goes into the driver at both indices. So our group frames are built as its are
+(for the host's frames addr2 = BSSID either way); relaying a third member's packets to the Switch should put that
+member's MAC in addr2 as kinnay does. Run 13 timing: the Switch announced its address (gratuitous ARP) 200 ms after
+our authentication response, before the group ARP probe (+500 ms), so that probe was valid and unanswered: our
+injected group data frames probably never leave the card (mt7925e; the capture cannot show it: no-ACK injections are
+not reported back). The Switch sends everything as group frames (addr1 ff:ff:ff:ff:ff:ff, no DS bits, addr3 our
+BSSID), its ARP reply to .1 too: the beacon takes those already (on_frame, by IP destination).
 If the Switch lists nothing: it may scan actively (probe requests in the log; answer them), or the card may refuse
 injection on mon0 (status line: frames sent / failed).
 
