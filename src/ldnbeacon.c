@@ -4,7 +4,8 @@
  * that concerns us (probe requests, authentication / association to our BSSID, other consoles' advertisements) is
  * logged, as a preview of stage 2.
  *   sudo ./ldnbeacon --room host[:port] [--iface wlan0] [--channel 1|6|11] [--nick name] [--password pw]
- *                    [-k keyfile]... [--log 0-2]
+ *                    [-k keyfile]... [--pcap file] [--log 0-2]
+ * --pcap saves every frame heard (radiotap, for Wireshark / analysis elsewhere).
  * Key files default to ../keys/prod.keys and ../keys/ldn.txt (run from ldn-beacon/). Ctrl+C gives Wi-Fi back. */
 #include "frames.h"
 #include "radio.h"
@@ -51,7 +52,9 @@ static void on_ldn(const RoomLdn *p, void *ud) {
 typedef struct { u8 mac[6]; } Mac;
 static Mac seen_probe[64], seen_adv[64];
 static int nseen_probe, nseen_adv;
-static unsigned cnt_probe, cnt_auth, cnt_assoc, cnt_adv_other, cnt_rx, cnt_echo;
+static unsigned cnt_probe, cnt_probe_nn, cnt_auth, cnt_assoc, cnt_adv_other, cnt_rx, cnt_echo_beacon, cnt_echo_adv;
+static Mac seen_nn_probe[64];
+static int nseen_nn_probe;
 
 static bool first_time(Mac *list, int *n, const u8 *mac) {
     for (int i = 0; i < *n; i++)
@@ -69,13 +72,26 @@ static void on_frame(const u8 *f, size_t n, const u8 bssid[6]) {
     u8 type = (f[0] >> 2) & 3, sub = f[0] >> 4;
     const u8 *a1 = f + 4, *a2 = f + 10;
     if (!memcmp(a2, bssid, 6)) {                            /* our own: the driver's report that it sent it */
-        cnt_echo++;
+        if (f[0] == 0x80) cnt_echo_beacon++;
+        else if (f[0] == 0xD0) cnt_echo_adv++;
         return;
     }
     if (type != 0) return;                                  /* management only */
     if (sub == 4) {                                         /* probe request */
         cnt_probe++;
         u8 ssid_len = n > 25 && f[24] == 0 ? f[25] : 0xFF;
+        /* Nintendo's vendor element (00 22 aa): a console searching */
+        for (size_t i = 24; i + 2 <= n && i + 2 + f[i + 1] <= n; i += 2 + (size_t)f[i + 1]) {
+            if (f[i] != 221 || f[i + 1] < 3 || f[i + 2] != 0x00 || f[i + 3] != 0x22 || f[i + 4] != 0xAA) continue;
+            cnt_probe_nn++;
+            if (first_time(seen_nn_probe, &nseen_nn_probe, a2)) {
+                char hex[2 * 255 + 1];
+                for (int k = 0; k < f[i + 1]; k++) snprintf(hex + 2 * k, 3, "%02x", f[i + 2 + k]);
+                hex[2 * f[i + 1]] = 0;
+                logf_(0, "air: a console's probe request from " MAC_FMT " (to " MAC_FMT ", %zu bytes), Nintendo element %s",
+                      MAC_ARG(a2), MAC_ARG(a1), n, hex);
+            }
+        }
         if (first_time(seen_probe, &nseen_probe, a2))
             logf_(1, "air: probe requests from " MAC_FMT " (SSID %s%u bytes)", MAC_ARG(a2),
                   ssid_len == 0xFF ? "? " : "", ssid_len == 0xFF ? 0 : ssid_len);
@@ -97,6 +113,7 @@ int main(int argc, char **argv) {
     RoomConfig c = {.port = 24872, .nick = "beacon", .game_name = "Pokemon Violet", .game_id = 0x01008F6008C5E000ull};
     char host[256] = "";
     const char *iface = NULL, *keyfiles[8];
+    const char *pcap_path = NULL;
     int nkeys = 0, channel = 6;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
@@ -111,9 +128,10 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--password") && v) c.password = v, i++;
         else if (!strcmp(a, "-k") && v && nkeys < 8) keyfiles[nkeys++] = v, i++;
         else if (!strcmp(a, "--log") && v) log_level = atoi(v), i++;
+        else if (!strcmp(a, "--pcap") && v) pcap_path = v, i++;
         else {
             fprintf(stderr, "usage: sudo ./ldnbeacon --room host[:port] [--iface wlan0] [--channel 1|6|11] "
-                            "[--nick name] [--password pw] [-k keyfile]... [--log 0-2]\n");
+                            "[--nick name] [--password pw] [-k keyfile]... [--pcap file] [--log 0-2]\n");
             return 2;
         }
     }
@@ -137,6 +155,16 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    FILE *pcap = NULL;
+    if (pcap_path) {
+        pcap = fopen(pcap_path, "wb");
+        if (!pcap) logf_(0, "ldnbeacon: cannot write %s", pcap_path);
+        else {
+            static const u8 gh[24] = {0xD4, 0xC3, 0xB2, 0xA1, 2, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                      0xFF, 0xFF, 0, 0, 127, 0, 0, 0};   /* little-endian, radiotap */
+            fwrite(gh, 1, sizeof gh, pcap);
+        }
+    }
     u64 start_us = now_us(), next_tick = now_ms(), last_scan = 0, last_status = now_ms();
     u16 seq = 0;
     unsigned sent = 0, send_fail = 0;
@@ -149,7 +177,16 @@ int main(int argc, char **argv) {
         if (!room_service(wait > 5 ? 5 : wait)) { logf_(0, "ldnbeacon: left the room"); rc = 1; break; }
         const u8 *f;
         size_t n;
-        while ((n = radio_recv(&radio, rx, sizeof rx, &f))) on_frame(f, n, radio.mac);
+        while ((n = radio_recv(&radio, rx, sizeof rx, &f))) {
+            on_frame(f, n, radio.mac);
+            if (pcap) {
+                u64 us = now_us() - start_us;
+                u32 len = (u32)(f - rx + n);
+                u32 rh[4] = {(u32)(us / 1000000), (u32)(us % 1000000), len, len};   /* x86: little-endian */
+                fwrite(rh, 4, 4, pcap);
+                fwrite(rx, 1, len, pcap);
+            }
+        }
 
         t = now_ms();
         if (t - last_scan >= 1000) {                        /* ask the room who hosts */
@@ -180,13 +217,16 @@ int main(int argc, char **argv) {
         }
         if (t - last_status >= 10000) {
             last_status = t;
-            logf_(1, "status: %s, %u frames sent (%u failed, %u reported back by the driver); heard %u frames: %u probe requests, %u authentications "
+            logf_(1, "status: %s, %u frames sent (%u failed; reported back by the driver: %u beacons, %u advertisements); heard %u frames: "
+                     "%u probe requests (%u from consoles), %u authentications "
                      "and %u association requests to us, %u Nintendo action frames from others",
-                  on_air ? "on the air" : "no network in the room yet", sent, send_fail, cnt_echo, cnt_rx, cnt_probe, cnt_auth,
+                  on_air ? "on the air" : "no network in the room yet", sent, send_fail, cnt_echo_beacon, cnt_echo_adv, cnt_rx, cnt_probe, cnt_probe_nn, cnt_auth,
                   cnt_assoc, cnt_adv_other);
             if (send_fail && !sent) logf_(0, "ldnbeacon: the card sends nothing (injection refused?)");
+            if (pcap) fflush(pcap);
         }
     }
+    if (pcap) fclose(pcap);
     radio_close(&radio);
     room_leave();
     return rc;
