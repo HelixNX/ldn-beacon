@@ -39,11 +39,11 @@ static const u8 bcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 /* addr3: the BSSID in beacons; the advertisement has the wildcard BSSID there (as a Switch sends it: a station
  * that is not in our network drops action frames naming another BSS) */
-static void hdr(Wr *w, u8 subtype, const u8 bssid[6], const u8 addr3[6], u16 seq) {
+static void hdr(Wr *w, u8 subtype, const u8 dest[6], const u8 bssid[6], const u8 addr3[6], u16 seq) {
     wr_u8(w, (u8)(subtype << 4));               /* management */
     wr_u8(w, 0);
     wr_zero(w, 2);                              /* duration */
-    wr_bytes(w, bcast, 6);
+    wr_bytes(w, dest, 6);
     wr_bytes(w, bssid, 6);
     wr_bytes(w, addr3, 6);
     u16 sc = (u16)(seq << 4);
@@ -53,14 +53,17 @@ static void hdr(Wr *w, u8 subtype, const u8 bssid[6], const u8 addr3[6], u16 seq
 
 static void ie(Wr *w, u8 id, const void *p, u8 n) { wr_u8(w, id); wr_u8(w, n); wr_bytes(w, p, n); }
 
-size_t frame_beacon(u8 *out, size_t cap, const u8 bssid[6], u16 seq, u64 tsf_us, u8 channel) {
+/* a beacon (to everyone, SSID hidden) or a probe response (to dest, with the SSID; no TIM): the same body */
+static size_t bss_frame(u8 *out, size_t cap, u8 subtype, const u8 dest[6], const u8 bssid[6], u16 seq, u64 tsf_us,
+                        u8 channel, const char *ssid_text) {
     Wr w = wr_init(out, cap);
-    hdr(&w, 8, bssid, bssid, seq);
+    hdr(&w, subtype, dest, bssid, bssid, seq);
     for (int i = 0; i < 8; i++) wr_u8(&w, (u8)(tsf_us >> (8 * i)));    /* timestamp, little-endian */
     wr_u8(&w, 100); wr_u8(&w, 0);               /* beacon interval 100 TU */
     wr_u8(&w, 0x11); wr_u8(&w, 0x04);           /* capabilities: ESS, privacy, short slot time */
     /* the elements a Switch's beacon carries (captured 2026-11-06), in its order */
-    static const u8 ssid[32];                   /* hidden: 32 zero bytes */
+    u8 ssid[32] = {0};                          /* beacons: hidden, 32 zero bytes */
+    if (ssid_text) memcpy(ssid, ssid_text, 32);
     static const u8 rates[] = {0x82, 0x84, 0x8B, 0x96, 0x0C, 0x12, 0x18, 0x24};
     static const u8 tim[] = {0x01, 0x02, 0x00, 0x00};
     static const u8 erp[] = {0x00};
@@ -79,7 +82,7 @@ size_t frame_beacon(u8 *out, size_t cap, const u8 bssid[6], u16 seq, u64 tsf_us,
     ie(&w, 0, ssid, sizeof ssid);
     ie(&w, 1, rates, sizeof rates);
     ie(&w, 3, &channel, 1);
-    ie(&w, 5, tim, sizeof tim);
+    if (subtype == 8) ie(&w, 5, tim, sizeof tim);
     ie(&w, 42, erp, sizeof erp);
     ie(&w, 50, ext_rates, sizeof ext_rates);
     ie(&w, 48, rsn, sizeof rsn);
@@ -93,9 +96,29 @@ size_t frame_beacon(u8 *out, size_t cap, const u8 bssid[6], u16 seq, u64 tsf_us,
     return w.err ? 0 : w.off;
 }
 
+size_t frame_beacon(u8 *out, size_t cap, const u8 bssid[6], u16 seq, u64 tsf_us, u8 channel) {
+    return bss_frame(out, cap, 8, bcast, bssid, seq, tsf_us, channel, NULL);
+}
+
+void host_ssid(const HostSession *s, char out[33]) {
+    static const char hex[] = "0123456789abcdef";
+    for (int i = 0; i < 16; i++) {
+        out[i * 2] = hex[s->session_id[i] >> 4];
+        out[i * 2 + 1] = hex[s->session_id[i] & 15];
+    }
+    out[32] = 0;
+}
+
+size_t frame_probe_resp(u8 *out, size_t cap, const HostSession *s, const u8 bssid[6], const u8 dest[6], u16 seq,
+                        u64 tsf_us, u8 channel) {
+    char ssid[33];
+    host_ssid(s, ssid);
+    return bss_frame(out, cap, 5, dest, bssid, seq, tsf_us, channel, ssid);
+}
+
 size_t frame_advert(u8 *out, size_t cap, const LdnKeys *k, const LdnAdvert *a, const u8 bssid[6], u16 seq) {
     Wr w = wr_init(out, cap);
-    hdr(&w, 13, bssid, bcast, seq);             /* action */
+    hdr(&w, 13, bcast, bssid, bcast, seq);      /* action */
     if (w.err) return 0;
     size_t n = adv_encode(k, a, out + w.off, cap - w.off);
     return n ? w.off + n : 0;

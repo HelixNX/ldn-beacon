@@ -53,8 +53,15 @@ typedef struct { u8 mac[6]; } Mac;
 static Mac seen_probe[64], seen_adv[64];
 static int nseen_probe, nseen_adv;
 static unsigned cnt_probe, cnt_probe_nn, cnt_auth, cnt_assoc, cnt_adv_other, cnt_rx, cnt_echo_beacon, cnt_echo_adv;
-static Mac seen_nn_probe[64];
-static int nseen_nn_probe;
+static Mac seen_nn_probe[64], seen_ours[64];
+static int nseen_nn_probe, nseen_ours;
+static unsigned cnt_probe_ours, cnt_probe_resp;
+
+/* the air side's state, for answering probes from on_frame */
+static Radio radio;
+static u8 channel_now;
+static u16 seq;
+static u64 start_us;
 
 static bool first_time(Mac *list, int *n, const u8 *mac) {
     for (int i = 0; i < *n; i++)
@@ -79,6 +86,23 @@ static void on_frame(const u8 *f, size_t n, const u8 bssid[6]) {
     if (type != 0) return;                                  /* management only */
     if (sub == 4) {                                         /* probe request */
         cnt_probe++;
+        /* for our network by name (the SSID the advertisement's session id gives): answer at once */
+        if (net.have && n >= 24 + 2 + 32 && f[24] == 0 && f[25] == 32) {
+            char ssid[33];
+            host_ssid(&net.session, ssid);
+            if (!memcmp(f + 26, ssid, 32)) {
+                cnt_probe_ours++;
+                u8 fr[FRAME_MAX];
+                size_t k = frame_probe_resp(fr, sizeof fr, &net.session, bssid, a2, seq++ & 0xFFF,
+                                            now_us() - start_us, channel_now);
+                bool ok = k && radio_send(&radio, fr, k);
+                cnt_probe_resp += ok;
+                if (first_time(seen_ours, &nseen_ours, a2))
+                    logf_(0, "air: " MAC_FMT " asks for our network by name (it read our advertisement): %s", MAC_ARG(a2),
+                          ok ? "answered" : "answer FAILED");
+                return;
+            }
+        }
         u8 ssid_len = n > 25 && f[24] == 0 ? f[25] : 0xFF;
         /* Nintendo's vendor element (00 22 aa): a console searching */
         for (size_t i = 24; i + 2 <= n && i + 2 + f[i + 1] <= n; i += 2 + (size_t)f[i + 1]) {
@@ -148,7 +172,7 @@ int main(int argc, char **argv) {
     RoomHandlers h = {.ldn = on_ldn};
     char err[256];
     if (!room_join(&c, &h, err, sizeof err)) { logf_(0, "ldnbeacon: %s", err); return 1; }
-    Radio radio;
+    channel_now = (u8)channel;
     if (!radio_open(&radio, iface, (u8)channel, err, sizeof err)) {
         logf_(0, "ldnbeacon: %s", err);
         room_leave();
@@ -165,8 +189,8 @@ int main(int argc, char **argv) {
             fwrite(gh, 1, sizeof gh, pcap);
         }
     }
-    u64 start_us = now_us(), next_tick = now_ms(), last_scan = 0, last_status = now_ms();
-    u16 seq = 0;
+    start_us = now_us();
+    u64 next_tick = now_ms(), last_scan = 0, last_status = now_ms();
     unsigned sent = 0, send_fail = 0;
     bool on_air = false;
     static u8 rx[4096], fr[FRAME_MAX];
@@ -218,9 +242,9 @@ int main(int argc, char **argv) {
         if (t - last_status >= 10000) {
             last_status = t;
             logf_(1, "status: %s, %u frames sent (%u failed; reported back by the driver: %u beacons, %u advertisements); heard %u frames: "
-                     "%u probe requests (%u from consoles), %u authentications "
+                     "%u probe requests (%u from consoles, %u for our network, %u answered), %u authentications "
                      "and %u association requests to us, %u Nintendo action frames from others",
-                  on_air ? "on the air" : "no network in the room yet", sent, send_fail, cnt_echo_beacon, cnt_echo_adv, cnt_rx, cnt_probe, cnt_probe_nn, cnt_auth,
+                  on_air ? "on the air" : "no network in the room yet", sent, send_fail, cnt_echo_beacon, cnt_echo_adv, cnt_rx, cnt_probe, cnt_probe_nn, cnt_probe_ours, cnt_probe_resp, cnt_auth,
                   cnt_assoc, cnt_adv_other);
             if (send_fail && !sent) logf_(0, "ldnbeacon: the card sends nothing (injection refused?)");
             if (pcap) fflush(pcap);

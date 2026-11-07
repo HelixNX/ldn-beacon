@@ -51,7 +51,11 @@ int main(int argc, char **argv) {
         if (!k) { fprintf(stderr, "advertisement: encode failed\n"); return 1; }
         record(f, fr, k, i * 100 + 1);
     }
+    static const u8 asker[6] = {0x38, 0xC6, 0xCE, 0x00, 0x00, 0x01};
+    size_t k = frame_probe_resp(fr, sizeof fr, &s, bssid, asker, 10, 512000, 6);
+    if (!k) { fprintf(stderr, "probe response: no room\n"); return 1; }
+    record(f, fr, k, 500);
     fclose(f);
-    printf("wrote %s: 5 beacons and 5 advertisements (subnet 169.254.%u.0, nonce %08x)\n", out, s.subnet, s.nonce);
+    printf("wrote %s: 5 beacons, 5 advertisements and a probe response (subnet 169.254.%u.0, nonce %08x)\n", out, s.subnet, s.nonce);
     return 0;
 }

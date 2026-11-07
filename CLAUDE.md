@@ -119,6 +119,12 @@ Runs 2026-11-06 (Union Circle, the Switch searching by code): our beacon is on t
 not find it, sent no probe requests with Nintendo's element and nothing to our BSSID (a 68 s recording on channel 6,
 `captures/20261106-beacon-run3/`): it scans passively. Our advertisement had our BSSID as addr3; a Switch sends it
 with the wildcard BSSID (ff:ff:ff:ff:ff:ff): fixed, now header-for-header as the Switch's. Next run: channel 6, then 11.
+Run 4 (channels 11, 6, 1; `captures/20261106-beacon-run4/`): **stage 1 works.** The Switch (<the Switch's MAC>, still
+on the home Wi-Fi in the background) sent probe requests on channels 6 and 1 asking for SSID
+18d2a425570c10915315dd3b478bff46: the recomp network's session id in hex, which only our advertisement carries. So it
+read and decrypted our advertisement, then probed for the network by name to join; we did not answer, so "can't find
+the group". Each search sends pairs: a wildcard probe and one for that SSID. Added: probe responses (the beacon's
+body with the SSID, no TIM, to the asker). Next: the Switch's authentication / association (stage 2).
 If the Switch lists nothing: it may scan actively (probe requests in the log; answer them), or the card may refuse
 injection on mon0 (status line: frames sent / failed).
 

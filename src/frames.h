@@ -25,5 +25,10 @@ void host_advert(const HostSession *s, const LdnNetworkInfo *n, const u8 bssid[6
 /* whole 802.11 frames (no radiotap, no FCS); return the size, 0 if cap is too small */
 size_t frame_beacon(u8 *out, size_t cap, const u8 bssid[6], u16 seq, u64 tsf_us, u8 channel);
 size_t frame_advert(u8 *out, size_t cap, const LdnKeys *k, const LdnAdvert *a, const u8 bssid[6], u16 seq);
+/* the network's SSID: the session id's 32 hex digits (lowercase, as a Switch probes for it) */
+void host_ssid(const HostSession *s, char out[33]);
+/* the answer to a probe request for our SSID: the beacon's body with the SSID shown, to dest */
+size_t frame_probe_resp(u8 *out, size_t cap, const HostSession *s, const u8 bssid[6], const u8 dest[6], u16 seq,
+                        u64 tsf_us, u8 channel);
 
 #endif
