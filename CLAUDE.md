@@ -29,7 +29,9 @@ Ryujinx are for behaviour only: our own implementation.
 | `src/ccmp.c` | CCMP (AES-CCM) in software: the Switch uses the data key directly, so no key is in the driver; ccmptest checks it against IEEE's vector and decrypts captures |
 | `src/ldnauth.c` | LDN authentication request parse / response build (challenge HMACs); authtest runs it on captured requests |
 | `src/bridge.c` | stage 3: IPv4 / UDP / ARP for the room <-> air bridge (checksums); bridgetest checks it |
-| `src/ldnbeacon.c` | Linux, the beacon: joins the room, Scans for a host, puts its network on the air every 100 ms; logs probe requests, joins to us and other consoles |
+| `src/ldnbeacon.c` | Linux, the beacon: joins the room, Scans for a host, hosts its network on the air (advertisements on mon0, hostapd for association), answers the LDN authentication, joins the Switch to the room host, bridges its UDP (Pia re-addressed and rewritten); logs it all, compile time first |
+| `src/pia.c` | Pia 6.x in LDN mode: CRC-32, AES-GCM (8-byte tag), session key and nonce, message parse / rewrite of addresses and constant ids (zlib) |
+| `src/piatest.c` | GCM against NIST's vector; finds the Pia variant that authenticates a capture's Pia packets; `map:` / `as:` round-trip a rewrite |
 | `src/roomtest.c` | joins a room, `--scan` broadcasts LDN Scans and prints the networks hosts answer with (`--dump dir`: their raw NetworkInfo); any OS |
 | `scripts/radio-check.sh` | first radio test on the laptop: card modes, a capture on channels 1 / 6 / 11 |
 | `build.bat` / `CMakeLists.txt` | `ldncore` (crypto, keys, advertisement; no network libraries), `room`, the tools. Windows (roomtest and advdump: clang-cl via `../nxrecomp/tools/vcenv.bat`, vcpkg enet zstd); Linux: `cmake -B build && cmake --build build` (pacman: base-devel cmake enet zstd) |
@@ -58,7 +60,7 @@ beacon's room address; each remote member's room address <-> a 169.254.X.Y on th
 
 ## Protocol (kinnay's NintendoClients wiki: LDN-Protocol, LDN-Passphrases, Local-Wireless-Communication-on-PC; kinnay/LDN README; read 2026-11-06; behaviour only)
 
-Constants (input keys, the challenge HMAC key, Scarlet / Violet's passphrase) are in `../keys/ldn.txt`, not here.
+Constants (input keys, the challenge HMAC key, Scarlet / Violet's passphrase and Pia game key) are in `../keys/ldn.txt`, not here.
 Big-endian unless stated.
 - **Advertisement** (vendor action frame to broadcast, every 100 ms): 7f, OUI 00 22 aa, protocol id 4, pad, packet
   type 0x0101, 2 zero, 2 pad; then the payload: session info (32: u64 local communication id, 2 pad, u16 game mode,
@@ -267,8 +269,16 @@ BSSID), its ARP reply to .1 too: the beacon takes those already (on_frame, by IP
 If the Switch lists nothing: it may scan actively (probe requests in the log; answer them), or the card may refuse
 injection on mon0 (status line: frames sent / failed).
 
-Next: (3) hosting: two monitor
-interfaces as kinnay, or hostapd if it receives what it must; association, the authentication exchange, data.
+**Where it stands (2026-11-07, after run 15):** room hosts, Switch joins: it finds the network, authenticates, takes
+its address, gets the host's Pia packets as direct frames, re-addressed and with the addresses inside rewritten (new,
+not yet run on the laptop). Next run: the Switch should answer (log: "addresses / constant ids inside replaced",
+"pia: air -> room", "bridge: air ... -> room") and stay past 4.5 s. Then, as they come: the rest of the raid's
+messages (join, lobby, battle), whatever else Pia checks against the MAC. Open: our injected group data frames do not
+reach the Switch (fine for one Switch); relayed frames from a third member (addr2 their MAC, as kinnay); nxrecomp's
+CreateNetwork should make a random security parameter as a console does (the beacon copies whatever the host has);
+the Switch hosting with the room joining (design item 2) is not started.
+Running it: `E:\RUN.txt` (or the stick's root): unzip with -DD, clean build, then ldnbeacon; results to the stick;
+saved here as `captures/<date>-beacon-runN/`. The zip carries `../keys/prod.keys` and `ldn.txt`.
 
 ## Language (open question, for later)
 
