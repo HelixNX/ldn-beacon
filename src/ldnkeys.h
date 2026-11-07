@@ -9,10 +9,13 @@ typedef struct LdnKeys {
     u8 data_kek[16];            /* the same for the data input key */
     u8 challenge_hmac[32];
     char passphrase[128];       /* the game's (ldn_passphrase_*), empty if none was given */
+    u8 pia_game_key[16];        /* the game's Pia key (pia_game_key_<game>, 16 characters), optional */
+    bool have_pia_key;
 } LdnKeys;
 
 /* Reads every file (later files override earlier names) and derives the keks. passphrase_name selects the game's
- * passphrase line (e.g. "ldn_passphrase_scarlet_violet"), NULL for none. Prints what is missing and returns false. */
+ * passphrase line (e.g. "ldn_passphrase_scarlet_violet"), NULL for none; the same game's Pia key is read when there
+ * (pia_game_key_scarlet_violet). Prints what is missing and returns false. */
 bool ldn_keys_load(LdnKeys *k, const char *const *files, int nfiles, const char *passphrase_name);
 
 /* key = dec(kek, first 16 bytes of SHA-256(input)) */

@@ -32,7 +32,7 @@ else()
 endif()
 
 # LDN itself (crypto, keys, the advertisement), no network libraries: builds anywhere
-add_library(ldncore STATIC src/common.c src/crypto.c src/ldnkeys.c src/adv.c src/frames.c src/ccmp.c src/ldnauth.c src/bridge.c)
+add_library(ldncore STATIC src/common.c src/crypto.c src/ldnkeys.c src/adv.c src/frames.c src/ccmp.c src/ldnauth.c src/bridge.c src/pia.c)
 target_include_directories(ldncore PUBLIC src)
 
 add_executable(advdump src/advdump.c)
@@ -43,6 +43,8 @@ add_executable(ccmptest src/ccmptest.c)
 target_link_libraries(ccmptest PRIVATE ldncore)
 add_executable(authtest src/authtest.c)
 target_link_libraries(authtest PRIVATE ldncore)
+add_executable(piatest src/piatest.c)
+target_link_libraries(piatest PRIVATE ldncore)
 add_executable(bridgetest src/bridgetest.c)
 target_link_libraries(bridgetest PRIVATE ldncore)
 

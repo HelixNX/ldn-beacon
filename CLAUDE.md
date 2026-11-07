@@ -231,6 +231,17 @@ no packet can authenticate in either direction, whatever the bridge does with fr
 the receivers' variable ids.) The fix has to be on the recomp's side (it presents LDN as a console does: 169.254.X
 addresses and the hex SSID) or the beacon re-encrypts every Pia packet (needs the game key and the network id; any
 addresses inside Pia messages would need rewriting too).
+Pia re-addressing (2026-11-07; the user chose it over changing the recomp): `src/pia.c` (CRC-32, AES-GCM with an
+8-byte tag, NIST vector ok), `piatest` tries the wiki's open details on a capture's Pia packets. **Settled on run 14:
+all 28 host packets authenticate** with session key = AES-encrypt(game key, the session id's 16 raw bytes) (the
+recomp's Pia reads the session id, not Eden's SSID string: so the key is the same on the air), nonce prefix =
+CRC-32(session id[1..15]) XOR the source IPv4, both big-endian, no AAD; re-encrypting gives the packet back. The game
+key is `pia_game_key_scarlet_violet` in `../keys/ldn.txt` (kinnay's Pia-Game-Keys). ldnbeacon decrypts each Pia
+packet with the sender's address on its side and encrypts it with the address the receiver sees (room -> air: the
+node's 169.254.X.(i+1); air -> room: our room address) and logs the first few and the counts. The host's first packet
+is a Net (0x2C) message. Still possible after this: Pia's LDN constant id comes from the MAC (Pia-Types), and the MACs
+differ between the sides (the host: 02:00:c0:a8:01:02 in the room, our BSSID on the air; the Switch: its own on the
+air, 02:00:c0:a8:01:03 in the room); if Pia checks them, the BSSID could take the host's room MAC.
 If the Switch lists nothing: it may scan actively (probe requests in the log; answer them), or the card may refuse
 injection on mon0 (status line: frames sent / failed).
 

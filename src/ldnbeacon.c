@@ -16,6 +16,7 @@
 #include "ccmp.h"
 #include "frames.h"
 #include "ldnauth.h"
+#include "pia.h"
 #include "radio.h"
 #include "room.h"
 #include <signal.h>
@@ -32,7 +33,12 @@ static struct {
     u64 seen_ms;
     HostSession session;
     u8 data_key[16];                /* the network's CCMP key (ldn_data_key) */
+    PiaNet pia;                     /* the game's Pia session (pia.h): same key on both sides, nonces by address */
+    bool have_pia;
 } net;
+/* Pia 6.x in LDN mode, as piatest settled it on run 14's packets: session key AES-encrypt(game key, session id),
+ * nonce prefix CRC-32(session id[1..15]) XOR the source IPv4 (big-endian both), no AAD */
+static const PiaVariant pia_variant = {0, 0, 0, 0};
 
 static LdnKeys keys;
 
@@ -77,6 +83,9 @@ static void on_ldn(const RoomLdn *p, void *ud) {
     net.seen_ms = now_ms();
     if (host_session_update(&net.session, &n)) {
         ldn_data_key(&keys, net.session.server_random, net.data_key);
+        net.have_pia = keys.have_pia_key;
+        if (net.have_pia) pia_net_init(&net.pia, keys.pia_game_key, net.session.session_id, &pia_variant);
+        else logf_(0, "network: no Pia game key (pia_game_key_* in ldn.txt): Pia packets pass unchanged and fail");
         static const u8 zero16[16];
         char sr[33];
         for (int i = 0; i < 16; i++) snprintf(sr + 2 * i, 3, "%02x", net.session.server_random[i]);
@@ -236,7 +245,27 @@ static void handle_data(const u8 *f, size_t n, const u8 src[6]) {
  * Node i of the room network is room address nodes[i].ipv4 on one side and 169.254.X.(i + 1) with the MAC the
  * advertisement lists on the other (node 0: the host, our BSSID; our own node: the Switch). The Switch keeps static
  * neighbour entries from the advertisement (kinnay's host sends no ARP), but ARP requests are answered anyway. */
-static unsigned cnt_to_air, cnt_to_room, cnt_drop_air, cnt_drop_room, cnt_arp;
+static unsigned cnt_to_air, cnt_to_room, cnt_drop_air, cnt_drop_room, cnt_arp, cnt_pia_ok, cnt_pia_bad;
+
+/* a Pia packet crossing sides: its nonce has the sender's address, which differs between the room and the air, so
+ * decrypt with the address it was sent from and encrypt with the one the receiver sees. Non-Pia payloads pass. */
+static const u8 *pia_readdress(const u8 *p, size_t n, u32 from_ip, u32 to_ip, const char *dir) {
+    static u8 b[2048];
+    if (!net.have_pia || !pia_is_packet(p, n) || n > sizeof b) return p;
+    memcpy(b, p, n);
+    if (!pia_decrypt(&net.pia, &pia_variant, from_ip, b, n)) {
+        if (cnt_pia_bad++ < 5)
+            logf_(0, "pia: %s packet from %u.%u.%u.%u (%zu bytes) does not authenticate: passed unchanged", dir,
+                  from_ip >> 24, from_ip >> 16 & 255, from_ip >> 8 & 255, from_ip & 255, n);
+        return p;
+    }
+    if (cnt_pia_ok++ < 5)
+        logf_(0, "pia: %s packet %u.%u.%u.%u -> as from %u.%u.%u.%u, %zu bytes, protocol type %02x", dir, from_ip >> 24,
+              from_ip >> 16 & 255, from_ip >> 8 & 255, from_ip & 255, to_ip >> 24, to_ip >> 16 & 255, to_ip >> 8 & 255,
+              to_ip & 255, n, n > PIA_HDR + 4 ? b[PIA_HDR + 4] : 0);
+    pia_encrypt(&net.pia, &pia_variant, to_ip, b, n);
+    return b;
+}
 static u8 room_protocol = 3;                        /* UDP as the room numbers it: as the host's packets do */
 static u16 ip_id;
 
@@ -304,7 +333,8 @@ static void on_proxy(const RoomProxy *p, void *ud) {
     u32 dst = p->broadcast ? (ldn_base() | 0xFF) : ldn_ip(me);
     const u8 *dest = p->broadcast && !bcast_unicast ? bcast : sta.mac;
     static u8 pkt[2048];
-    size_t n = ipv4_udp_build(pkt, sizeof pkt, ldn_ip(src), dst, p->local_port, p->remote_port, p->data, p->size,
+    const u8 *payload = pia_readdress(p->data, p->size, from, ldn_ip(src), "room -> air");
+    size_t n = ipv4_udp_build(pkt, sizeof pkt, ldn_ip(src), dst, p->local_port, p->remote_port, payload, p->size,
                               ip_id++);
     u8 smac[6];
     node_mac(src, smac);
@@ -364,7 +394,7 @@ static void from_switch(u16 et, const u8 *p, size_t n, const u8 src_mac[6]) {
     }
     u32 rip = bcast ? 0xFFFFFFFFu : net.info.nodes[t].ipv4;
     RoomProxy r = {.local_port = sp, .remote_port = dp, .protocol = room_protocol, .broadcast = bcast,
-                   .data = p + off, .size = (u32)len};
+                   .data = pia_readdress(p + off, len, s, room_ip_u32(), "air -> room"), .size = (u32)len};
     memcpy(r.local_ip, room_ip(), 4);
     r.remote_ip[0] = (u8)(rip >> 24); r.remote_ip[1] = (u8)(rip >> 16); r.remote_ip[2] = (u8)(rip >> 8); r.remote_ip[3] = (u8)rip;
     room_send_proxy(&r);
@@ -519,7 +549,7 @@ int main(int argc, char **argv) {
     if (!*host) { fprintf(stderr, "ldnbeacon: --room host[:port] is required\n"); return 2; }
     /* which code is running: run 11 ran run 10's object file (zip timestamps are local time, the laptop's clock UTC,
      * so the newer source looked older than the old build and make skipped it) */
-    logf_(0, "ldnbeacon: stage 3 (room <-> air bridge, broadcast mode %d, ARP probes, high PN, the host's security parameter), compiled " __DATE__
+    logf_(0, "ldnbeacon: stage 3 (room <-> air bridge, broadcast mode %d, ARP probes, high PN, the host's security parameter, Pia re-addressed), compiled " __DATE__
              " " __TIME__, bcast_mode);
     if (channel != 1 && channel != 6 && channel != 11) { fprintf(stderr, "ldnbeacon: channel 1, 6 or 11\n"); return 2; }
     if (!nkeys) { keyfiles[0] = "../keys/prod.keys"; keyfiles[1] = "../keys/ldn.txt"; nkeys = 2; }
@@ -701,11 +731,12 @@ int main(int argc, char **argv) {
                      "%u probe requests (%u from consoles, %u for our network, %u answered), %u authentications "
                      "and %u association requests to us, %u EAPOL and %u encrypted data frames to us (%u decrypted, %u not; %u LDN "
                      "authentications answered, %u other), %u Nintendo action frames from others; station %s; bridge: %u to the "
-                     "air, %u to the room, %u ARP answered, dropped %u from the air / %u from the room",
+                     "air, %u to the room, %u ARP answered, dropped %u from the air / %u from the room; Pia %u "
+                     "re-addressed, %u not authenticated",
                   on_air ? "on the air" : "no network in the room yet", sent, send_fail, cnt_echo_beacon, cnt_echo_adv, cnt_rx, cnt_probe, cnt_probe_nn, cnt_probe_ours, cnt_probe_resp, cnt_auth,
                   cnt_assoc, cnt_eapol, cnt_protected, cnt_decrypted, cnt_undecryptable, cnt_auth_answered,
                   cnt_other_data, cnt_adv_other, !sta.active ? "none" : sta.in_room ? "joined" : "authenticated",
-                  cnt_to_air, cnt_to_room, cnt_arp, cnt_drop_air, cnt_drop_room);
+                  cnt_to_air, cnt_to_room, cnt_arp, cnt_drop_air, cnt_drop_room, cnt_pia_ok, cnt_pia_bad);
             if (send_fail && !sent) logf_(0, "ldnbeacon: the card sends nothing (injection refused?)");
             if (pcap) fflush(pcap);
         }

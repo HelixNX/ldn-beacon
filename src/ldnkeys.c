@@ -49,6 +49,12 @@ bool ldn_keys_load(LdnKeys *k, const char *const *files, int nfiles, const char 
                     }
                     have[i] = true;
                 }
+            static const char pp[] = "ldn_passphrase_";
+            if (passphrase_name && !strncmp(passphrase_name, pp, sizeof pp - 1) && !strncmp(name, "pia_game_key_", 13) &&
+                !strcmp(name + 13, passphrase_name + sizeof pp - 1) && strlen(v) == 16) {
+                memcpy(k->pia_game_key, v, 16);
+                k->have_pia_key = true;
+            }
             if (passphrase_name && !strcmp(name, passphrase_name) && strlen(v) < sizeof k->passphrase) {
                 strcpy(k->passphrase, v);
                 have[NKEYS - 1] = true;
