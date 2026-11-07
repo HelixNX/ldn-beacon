@@ -29,7 +29,7 @@ static bool self_test(void) {
                                 0x23, 0x42, 0xa6, 0x43, 0xe4, 0x32, 0x46, 0xe8, 0x0c, 0x3c, 0x04, 0xd0, 0x19,
                                 0x78, 0x45, 0xce, 0x0b, 0x16, 0xf9, 0x76, 0x23};
     u8 out[128], back[64];
-    size_t n = ccmp_encrypt(key, hdr, 24, plain, 20, 0xB5039776E70Cull, out, sizeof out);
+    size_t n = ccmp_encrypt(key, hdr, 24, plain, 20, 0xB5039776E70Cull, 0, out, sizeof out);
     bool enc_ok = n == sizeof expect && !memcmp(out, expect, n);
     size_t bn;
     u64 pn;

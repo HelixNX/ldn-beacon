@@ -44,7 +44,7 @@ int main(int argc, char **argv) {
         memcpy(body, llc, 8);
         memcpy(body + 8, resp, rn);
         u8 fr[1300], back[1300];
-        size_t fn = ccmp_encrypt(dkey, hdr, 26, body, 8 + rn, 1, fr, sizeof fr), bn = 0;
+        size_t fn = ccmp_encrypt(dkey, hdr, 26, body, 8 + rn, 1, 0, fr, sizeof fr), bn = 0;
         u64 pn;
         bool rt = fn && ccmp_decrypt(dkey, fr, fn, back, &bn, &pn) && bn == 8 + rn && !memcmp(back, body, bn);
         printf("  response %zu bytes (LDN), frame %zu bytes, CCMP round trip %s\n", rn, fn, rt ? "ok" : "FAILED");

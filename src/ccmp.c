@@ -95,7 +95,7 @@ bool ccmp_decrypt(const u8 key[16], const u8 *f, size_t len, u8 *out, size_t *ou
     return true;
 }
 
-size_t ccmp_encrypt(const u8 key[16], const u8 *hdr, size_t h, const u8 *body, size_t n, u64 pn, u8 *out,
+size_t ccmp_encrypt(const u8 key[16], const u8 *hdr, size_t h, const u8 *body, size_t n, u64 pn, int key_id, u8 *out,
                     size_t cap) {
     if (h + 8 + n + 8 > cap || h < 24) return 0;
     memcpy(out, hdr, h);
@@ -104,7 +104,7 @@ size_t ccmp_encrypt(const u8 key[16], const u8 *hdr, size_t h, const u8 *body, s
     c[0] = (u8)pn;
     c[1] = (u8)(pn >> 8);
     c[2] = 0;
-    c[3] = 0x20;                                            /* ExtIV, key 0 */
+    c[3] = (u8)(0x20 | (key_id & 3) << 6);                  /* ExtIV, key index */
     c[4] = (u8)(pn >> 16);
     c[5] = (u8)(pn >> 24);
     c[6] = (u8)(pn >> 32);

@@ -12,6 +12,7 @@
  * --pcap saves every frame heard (radiotap, for Wireshark / analysis elsewhere).
  * Key files default to ../keys/prod.keys and ../keys/ldn.txt (run from ldn-beacon/). Ctrl+C gives Wi-Fi back. */
 #include "ap.h"
+#include "bridge.h"
 #include "ccmp.h"
 #include "frames.h"
 #include "ldnauth.h"
@@ -144,7 +145,7 @@ static bool send_ldn_frame(const u8 dest[6], const u8 *p, size_t n) {
     u16 sc = (u16)((seq++ & 0xFFF) << 4);
     hdr[22] = (u8)sc;
     hdr[23] = (u8)(sc >> 8);
-    size_t k = ccmp_encrypt(net.data_key, hdr, 26, body, n + 8, ++tx_pn, fr, sizeof fr);
+    size_t k = ccmp_encrypt(net.data_key, hdr, 26, body, n + 8, ++tx_pn, 0, fr, sizeof fr);
     return k && radio_send_ex(&radio, fr, k, true, true);
 }
 
@@ -193,6 +194,8 @@ static void handle_ldn(const u8 *p, size_t n, const u8 src[6]) {
     }
 }
 
+static void from_switch(u16 et, const u8 *p, size_t n, const u8 src_mac[6]);
+
 /* a protected data frame to us: decrypt with the network's key */
 static void handle_data(const u8 *f, size_t n, const u8 src[6]) {
     static u8 pl[4096];
@@ -208,9 +211,139 @@ static void handle_data(const u8 *f, size_t n, const u8 src[6]) {
     if (pn_len < 8 || pl[0] != 0xAA || pl[1] != 0xAA || pl[2] != 0x03) return;
     u16 et = (u16)(pl[6] << 8 | pl[7]);
     if (et == LDN_ETHERTYPE) { handle_ldn(pl + 8, pn_len - 8, src); return; }
-    if (cnt_other_data++ < 10)
-        logf_(0, "air: data from " MAC_FMT ": EtherType %04x, %zu bytes (not forwarded yet: stage 3)", MAC_ARG(src),
-              et, pn_len - 8);
+    if (et == ETHERTYPE_IPV4 || et == ETHERTYPE_ARP) { from_switch(et, pl + 8, pn_len - 8, src); return; }
+    cnt_other_data++;                                   /* IPv6 and the like: the console's own, not the game's */
+}
+
+/* ---- stage 3: the bridge between the room's proxy packets and IPv4 on the air ------------------------------------
+ * Node i of the room network is room address nodes[i].ipv4 on one side and 169.254.X.(i + 1) with the MAC the
+ * advertisement lists on the other (node 0: the host, our BSSID; our own node: the Switch). The Switch keeps static
+ * neighbour entries from the advertisement (kinnay's host sends no ARP), but ARP requests are answered anyway. */
+static unsigned cnt_to_air, cnt_to_room, cnt_drop_air, cnt_drop_room, cnt_arp;
+static u8 room_protocol = 3;                        /* UDP as the room numbers it: as the host's packets do */
+static u16 ip_id;
+
+static u32 ldn_base(void) { return 0xA9FE0000u | (u32)net.session.subnet << 8; }
+static u32 ldn_ip(int node) { return ldn_base() | (u32)(node + 1); }
+
+static int node_of_room_ip(u32 ip) {
+    for (int i = 0; i < LDN_NODES; i++)
+        if ((i == 0 || net.info.nodes[i].is_connected) && net.info.nodes[i].ipv4 == ip) return i;
+    return -1;
+}
+
+static int node_of_ldn_ip(u32 ip) {
+    if ((ip & 0xFFFFFF00u) != ldn_base()) return -1;
+    int i = (int)(ip & 0xFF) - 1;
+    if (i < 0 || i >= LDN_NODES || (i && !net.info.nodes[i].is_connected)) return -1;
+    return i;
+}
+
+static int sta_node(void) { return sta.active ? node_of_room_ip(room_ip_u32()) : -1; }
+
+static void node_mac(int i, u8 mac[6]) {
+    if (i == 0) memcpy(mac, radio.mac, 6);
+    else if (i == sta_node()) memcpy(mac, sta.mac, 6);
+    else memcpy(mac, net.info.nodes[i].mac, 6);
+}
+
+/* an Ethernet-style frame to the Switch (or everyone): LLC/SNAP + ethertype, CCMP (key index 0 unicast, 1 group),
+ * data from the AP (FromDS) with src as the source address */
+static bool send_data_frame(const u8 dest[6], const u8 src[6], u16 ethertype, const u8 *p, size_t n) {
+    static u8 body[2048], fr[2200];
+    if (n + 8 > sizeof body) return false;
+    static const u8 llc[6] = {0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00};
+    memcpy(body, llc, 6);
+    body[6] = (u8)(ethertype >> 8);
+    body[7] = (u8)ethertype;
+    memcpy(body + 8, p, n);
+    u8 hdr[24] = {0x08, 0x02};                          /* data, FromDS */
+    memcpy(hdr + 4, dest, 6);
+    memcpy(hdr + 10, radio.mac, 6);
+    memcpy(hdr + 16, src, 6);
+    u16 sc = (u16)((seq++ & 0xFFF) << 4);
+    hdr[22] = (u8)sc;
+    hdr[23] = (u8)(sc >> 8);
+    bool group = dest[0] & 1;
+    size_t k = ccmp_encrypt(net.data_key, hdr, 24, body, n + 8, ++tx_pn, group ? 1 : 0, fr, sizeof fr);
+    return k && radio_send_ex(&radio, fr, k, !group, true);
+}
+
+/* room -> air: a datagram for our member (the Switch) or for everyone */
+static void on_proxy(const RoomProxy *p, void *ud) {
+    (void)ud;
+    if (p->protocol == 3 || p->protocol == 4) room_protocol = p->protocol;
+    int me = sta_node();
+    u32 from = (u32)p->local_ip[0] << 24 | (u32)p->local_ip[1] << 16 | (u32)p->local_ip[2] << 8 | p->local_ip[3];
+    int src = net.have ? node_of_room_ip(from) : -1;
+    if (me < 0 || src < 0 || src == me) {
+        if (cnt_drop_room++ < 5)
+            logf_(0, "room: datagram from " IP_FMT ":%u to %s" IP_FMT ":%u, %u bytes dropped (%s)", IP_ARG(p->local_ip),
+                  p->local_port, p->broadcast ? "everyone, " : "", IP_ARG(p->remote_ip), p->remote_port, p->size,
+                  me < 0 ? "no Switch joined" : src < 0 ? "sender not in the network" : "from ourselves");
+        return;
+    }
+    static const u8 bcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    u32 dst = p->broadcast ? (ldn_base() | 0xFF) : ldn_ip(me);
+    static u8 pkt[2048];
+    size_t n = ipv4_udp_build(pkt, sizeof pkt, ldn_ip(src), dst, p->local_port, p->remote_port, p->data, p->size,
+                              ip_id++);
+    u8 smac[6];
+    node_mac(src, smac);
+    bool ok = n && send_data_frame(p->broadcast ? bcast : sta.mac, smac, ETHERTYPE_IPV4, pkt, n);
+    cnt_to_air += ok;
+    if (cnt_to_air <= 5 || !ok)
+        logf_(0, "bridge: room " IP_FMT ":%u -> air 169.254.%u.%u:%u%s, %u bytes%s", IP_ARG(p->local_ip), p->local_port,
+              net.session.subnet, dst & 0xFF, p->remote_port, p->broadcast ? " (broadcast)" : "", p->size,
+              ok ? "" : ": send FAILED");
+}
+
+/* air -> room: an IPv4 or ARP frame from the Switch */
+static void from_switch(u16 et, const u8 *p, size_t n, const u8 src_mac[6]) {
+    int me = sta_node();
+    if (me < 0 || memcmp(src_mac, sta.mac, 6)) { cnt_drop_air++; return; }
+    if (et == ETHERTYPE_ARP) {
+        Arp q;
+        if (!arp_parse(p, n, &q) || q.op != 1) return;
+        int t = node_of_ldn_ip(q.tpa);
+        if (t < 0 || t == me) return;                   /* its own address (announcement) or nobody */
+        Arp r = {.op = 2, .spa = q.tpa, .tpa = q.spa};
+        node_mac(t, r.sha);
+        memcpy(r.tha, q.sha, 6);
+        u8 b[64];
+        size_t k = arp_build(b, sizeof b, &r);
+        bool ok = k && send_data_frame(q.sha, r.sha, ETHERTYPE_ARP, b, k);
+        if (cnt_arp++ < 5)
+            logf_(0, "bridge: ARP for 169.254.%u.%u answered%s", net.session.subnet, q.tpa & 0xFF, ok ? "" : " (FAILED)");
+        return;
+    }
+    if (et != ETHERTYPE_IPV4) return;
+    u32 s, d;
+    u16 sp, dp;
+    size_t off, len;
+    IpStatus st = ipv4_udp_parse(p, n, &s, &d, &sp, &dp, &off, &len);
+    if (st != IP_OK) {
+        if (cnt_drop_air++ < 5)
+            logf_(0, "bridge: IPv4 from the Switch not forwarded (%s)", st == IP_FRAGMENT ? "a fragment" :
+                  st == IP_NOT_UDP ? "not UDP" : "malformed");
+        return;
+    }
+    bool bcast = d == (ldn_base() | 0xFF) || d == 0xFFFFFFFFu || (d >> 28) == 0xE;
+    int t = bcast ? -1 : node_of_ldn_ip(d);
+    if (!bcast && (t < 0 || t == me)) {
+        if (cnt_drop_air++ < 5) logf_(0, "bridge: datagram to unknown 169.254.%u.%u dropped", (d >> 8) & 255, d & 255);
+        return;
+    }
+    u32 rip = bcast ? 0xFFFFFFFFu : net.info.nodes[t].ipv4;
+    RoomProxy r = {.local_port = sp, .remote_port = dp, .protocol = room_protocol, .broadcast = bcast,
+                   .data = p + off, .size = (u32)len};
+    memcpy(r.local_ip, room_ip(), 4);
+    r.remote_ip[0] = (u8)(rip >> 24); r.remote_ip[1] = (u8)(rip >> 16); r.remote_ip[2] = (u8)(rip >> 8); r.remote_ip[3] = (u8)rip;
+    room_send_proxy(&r);
+    cnt_to_room++;
+    if (cnt_to_room <= 5)
+        logf_(0, "bridge: air 169.254.%u.%u:%u -> room " IP_FMT ":%u%s, %zu bytes", (s >> 8) & 255, s & 255, sp,
+              IP_ARG(r.remote_ip), dp, bcast ? " (broadcast)" : "", len);
 }
 
 static bool first_time(Mac *list, int *n, const u8 *mac) {
@@ -230,7 +363,8 @@ static void on_frame(const u8 *f, size_t n, const u8 bssid[6]) {
         else if (f[0] == 0xD0) cnt_echo_adv++;
         return;
     }
-    if (type == 2 && !memcmp(a1, bssid, 6)) {               /* data to us */
+    /* data to us, or the joined Switch's group frames (no DS bits, to a broadcast / multicast address) */
+    if (type == 2 && (!memcmp(a1, bssid, 6) || (sta.active && !memcmp(a2, sta.mac, 6) && (a1[0] & 1)))) {
         if (f[1] & 0x40) {                                  /* protected: CCMP with the network's key */
             cnt_protected++;
             if (net.have) handle_data(f, n, a2);
@@ -350,7 +484,7 @@ int main(int argc, char **argv) {
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
     signal(SIGHUP, on_signal);
-    RoomHandlers h = {.ldn = on_ldn};
+    RoomHandlers h = {.ldn = on_ldn, .proxy = on_proxy};
     char err[256];
     if (!room_join(&c, &h, err, sizeof err)) { logf_(0, "ldnbeacon: %s", err); return 1; }
     channel_now = (u8)channel;
@@ -511,10 +645,12 @@ int main(int argc, char **argv) {
             logf_(1, "status: %s, %u frames sent (%u failed; reported back by the driver: %u beacons, %u advertisements); heard %u frames: "
                      "%u probe requests (%u from consoles, %u for our network, %u answered), %u authentications "
                      "and %u association requests to us, %u EAPOL and %u encrypted data frames to us (%u decrypted, %u not; %u LDN "
-                     "authentications answered, %u other), %u Nintendo action frames from others; station %s",
+                     "authentications answered, %u other), %u Nintendo action frames from others; station %s; bridge: %u to the "
+                     "air, %u to the room, %u ARP answered, dropped %u from the air / %u from the room",
                   on_air ? "on the air" : "no network in the room yet", sent, send_fail, cnt_echo_beacon, cnt_echo_adv, cnt_rx, cnt_probe, cnt_probe_nn, cnt_probe_ours, cnt_probe_resp, cnt_auth,
                   cnt_assoc, cnt_eapol, cnt_protected, cnt_decrypted, cnt_undecryptable, cnt_auth_answered,
-                  cnt_other_data, cnt_adv_other, !sta.active ? "none" : sta.in_room ? "joined" : "authenticated");
+                  cnt_other_data, cnt_adv_other, !sta.active ? "none" : sta.in_room ? "joined" : "authenticated",
+                  cnt_to_air, cnt_to_room, cnt_arp, cnt_drop_air, cnt_drop_room);
             if (send_fail && !sent) logf_(0, "ldnbeacon: the card sends nothing (injection refused?)");
             if (pcap) fflush(pcap);
         }

@@ -28,6 +28,7 @@ Ryujinx are for behaviour only: our own implementation.
 | `src/ap.c` | Linux: hostapd for the network (stage 2): hidden SSID as a Switch's, WPA2 with a guessed key (`--psk-mode`), Nintendo's element, debug log with keys |
 | `src/ccmp.c` | CCMP (AES-CCM) in software: the Switch uses the data key directly, so no key is in the driver; ccmptest checks it against IEEE's vector and decrypts captures |
 | `src/ldnauth.c` | LDN authentication request parse / response build (challenge HMACs); authtest runs it on captured requests |
+| `src/bridge.c` | stage 3: IPv4 / UDP / ARP for the room <-> air bridge (checksums); bridgetest checks it |
 | `src/ldnbeacon.c` | Linux, the beacon: joins the room, Scans for a host, puts its network on the air every 100 ms; logs probe requests, joins to us and other consoles |
 | `src/roomtest.c` | joins a room, `--scan` broadcasts LDN Scans and prints the networks hosts answer with (`--dump dir`: their raw NetworkInfo); any OS |
 | `scripts/radio-check.sh` | first radio test on the laptop: card modes, a capture on channels 1 / 6 / 11 |
@@ -172,6 +173,19 @@ a station skipping advertisements by nonce would never see the update: the nonce
 (flags back to 2, `--resp-flags` still there). (Reading these logs: hostapd's debug lines interleave with ours, so
 grep without anchoring at line start.) The user's second Switch (for a real host + station capture, RUN.txt block 4)
 was out of charge.
+Run 10 (`captures/20261106-beacon-run10/`): **the nonce fix worked**: the Switch stayed 3.8 s and 4.4 s instead of
+510 ms. It took its address from our advertisement (169.254.15.2: a gratuitous ARP), sent IPv6 startup noise, all as
+group frames (no DS bits, to broadcast / multicast) **encrypted with the same data key** (key index 1), then left: the
+host's game traffic never reached it (the beacon did not forward room packets yet). kinnay's LDN library (read
+2026-11-06, behaviour only) agrees: response flags 2, client random echoed, host unk 0x60 zero; the advertisement
+nonce is a counter bumped on each change; a station waits up to 1 s for an advertisement with its MAC; data frames
+FromDS, one key, key index 0 unicast / 1 broadcast, one PN counter; no ARP (static neighbours from the participant
+list), no DHCP, no host timeouts. Two Switches for a reference capture: not possible (one copy of the game).
+Stage 3 (bridge.c + ldnbeacon): room proxy datagrams for our member (or broadcast) -> IPv4/UDP from the sender's
+169.254.X.(node+1) and advertised MAC (host: BSSID), CCMP, FromDS to the Switch (or broadcast, key index 1); the
+Switch's IPv4/UDP (unicast to us or group frames) -> room proxy from our room address to the node's room address
+(broadcast for .255 / multicast), protocol number as the host's packets use (3 by default); ARP requests answered with
+the advertised MACs; fragments and non-UDP dropped (logged). bridgetest checks the packets.
 If the Switch lists nothing: it may scan actively (probe requests in the log; answer them), or the card may refuse
 injection on mon0 (status line: frames sent / failed).
 

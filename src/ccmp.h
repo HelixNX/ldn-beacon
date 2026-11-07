@@ -12,9 +12,10 @@
 bool ccmp_decrypt(const u8 key[16], const u8 *frame, size_t len, u8 *out, size_t *out_len, u64 *pn);
 
 /* hdr: a data frame's MAC header (hdr_len bytes; the protected bit gets set); body: the plaintext from the LLC header
- * on. Writes header + CCMP header + ciphertext + MIC to out (cap bytes), returns the size or 0. */
+ * on; key_id: 0 for unicast, 1 for group frames (LDN uses the same key at both indices). Writes header + CCMP header
+ * + ciphertext + MIC to out (cap bytes), returns the size or 0. */
 size_t ccmp_encrypt(const u8 key[16], const u8 *hdr, size_t hdr_len, const u8 *body, size_t body_len, u64 pn,
-                    u8 *out, size_t cap);
+                    int key_id, u8 *out, size_t cap);
 
 /* the MAC header's length for a data frame (QoS, four addresses), 0 if not a data frame */
 size_t ccmp_hdr_len(const u8 *frame, size_t len);
