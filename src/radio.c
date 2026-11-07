@@ -51,7 +51,7 @@ static bool first_wifi(char *out, size_t n) {
         char p[300];
         snprintf(p, sizeof p, "/sys/class/net/%s/phy80211", e->d_name);
         if (e->d_name[0] != '.' && strcmp(e->d_name, "mon0") && !access(p, F_OK)) {
-            snprintf(out, n, "%s", e->d_name);
+            snprintf(out, n, "%.31s", e->d_name);
             found = true;
         }
     }

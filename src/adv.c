@@ -137,7 +137,8 @@ size_t adv_encode(const LdnKeys *k, const LdnAdvert *a, u8 *frame, size_t cap) {
         wr_u8(&d, p->connected);
         wr_u8(&d, p->platform);
         char name[32] = {0};
-        strncpy(name, p->user_name, sizeof name);
+        size_t nl = strlen(p->user_name);
+        memcpy(name, p->user_name, nl < sizeof name ? nl : sizeof name);
         wr_bytes(&d, name, 32);
         wr_be16(&d, p->app_version);
         wr_zero(&d, 10);

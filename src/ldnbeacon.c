@@ -51,7 +51,7 @@ static void on_ldn(const RoomLdn *p, void *ud) {
 typedef struct { u8 mac[6]; } Mac;
 static Mac seen_probe[64], seen_adv[64];
 static int nseen_probe, nseen_adv;
-static unsigned cnt_probe, cnt_auth, cnt_assoc, cnt_adv_other, cnt_rx;
+static unsigned cnt_probe, cnt_auth, cnt_assoc, cnt_adv_other, cnt_rx, cnt_echo;
 
 static bool first_time(Mac *list, int *n, const u8 *mac) {
     for (int i = 0; i < *n; i++)
@@ -68,7 +68,10 @@ static void on_frame(const u8 *f, size_t n, const u8 bssid[6]) {
     if (n < 24) return;
     u8 type = (f[0] >> 2) & 3, sub = f[0] >> 4;
     const u8 *a1 = f + 4, *a2 = f + 10;
-    if (!memcmp(a2, bssid, 6)) return;                      /* our own, echoed */
+    if (!memcmp(a2, bssid, 6)) {                            /* our own: the driver's report that it sent it */
+        cnt_echo++;
+        return;
+    }
     if (type != 0) return;                                  /* management only */
     if (sub == 4) {                                         /* probe request */
         cnt_probe++;
@@ -177,9 +180,9 @@ int main(int argc, char **argv) {
         }
         if (t - last_status >= 10000) {
             last_status = t;
-            logf_(1, "status: %s, %u frames sent (%u failed); heard %u frames: %u probe requests, %u authentications "
+            logf_(1, "status: %s, %u frames sent (%u failed, %u reported back by the driver); heard %u frames: %u probe requests, %u authentications "
                      "and %u association requests to us, %u Nintendo action frames from others",
-                  on_air ? "on the air" : "no network in the room yet", sent, send_fail, cnt_rx, cnt_probe, cnt_auth,
+                  on_air ? "on the air" : "no network in the room yet", sent, send_fail, cnt_echo, cnt_rx, cnt_probe, cnt_auth,
                   cnt_assoc, cnt_adv_other);
             if (send_fail && !sent) logf_(0, "ldnbeacon: the card sends nothing (injection refused?)");
         }
