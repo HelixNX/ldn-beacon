@@ -306,6 +306,22 @@ static const u8 *pia_readdress(const u8 *p, size_t n, u32 from_ip, u32 to_ip, bo
     }
     if (rep && cnt_pia_rewritten++ < 10)
         logf_(0, "pia: %s packet: %u addresses / constant ids inside replaced (%zu -> %zu bytes)", dir, rep, n, wn);
+    static unsigned dumped[2];
+    if (dumped[to_air]++ < 2) {                     /* the first two each way, decrypted, before and after */
+        for (int k = 0; k < 2; k++) {
+            const u8 *q = k ? w : b;
+            size_t qn = k ? wn : n;
+            logf_(0, "pia: %s packet %s (%zu bytes, footer %u):", dir, k ? "after" : "before", qn, q[0xB]);
+            for (size_t i = 0; i < qn; i += 32) {
+                char line[80];
+                size_t o = 0;
+                for (size_t j = i; j < qn && j < i + 32; j++) o += (size_t)snprintf(line + o, sizeof line - o, "%02x", q[j]);
+                printf("      %s\n", line);
+            }
+            pia_dump(q, qn);
+            fflush(stdout);
+        }
+    }
     pia_encrypt(&net.pia, &pia_variant, to_ip, w, wn);
     *len = wn;
     return w;

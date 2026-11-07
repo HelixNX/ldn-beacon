@@ -351,3 +351,16 @@ channel 6):
   (level 2, so the header is `48 4b` again); piatest round trip ok. Next S3 run tests it. The Net message is
   UpdateNetworkConnectionStatus (0x11, re-sent every 500 ms until acked; kinnay's Net-Protocol): the Switch should
   answer with 0x12.
+- Runs 4-6 (`captures/20261107-s3-run4..6/`, with that fix): unchanged, 2318-0533 each time (Nintendo: "Unable to
+  communicate with the other console(s)": Pia's timeout), the Switch leaves 4.6-4.8 s after our response and sends
+  no IPv4 UDP. ldnbeacon now logs the first two rewritten packets each way, decrypted, before and after. Run 5's
+  dump: the 124 -> 108 bytes is only padding (the host's deflate stream is 65 bytes with a sync flush, ours 62: one
+  16-byte pad block less); the rewritten message is right as far as we know it: host constant id from our BSSID,
+  169.254.64.1 / .2 port 12345, network id 03e36a9a = CRC-32(session id[1..15]). The bridge sends the rewritten
+  length (its log line prints the room size). Run 6, broadcasts as group frames (`--bcast-mode 0`): same; that run
+  only the unicast ARP probe was answered. The S3 dropped nothing while the Switch was there.
+  So the Switch's Pia probably does not accept the host's packets, and the one thing never checked against a real
+  console is the crypto: key and nonce are what the recomp's Pia does, on a console they could come from other
+  inputs (the SSID text, the server random). The decisive test is a console's own Pia packets: the Switch hosting
+  with the beacon joining as a station (design item 2: the S3 as a station, no 4-way handshake, our LDN
+  authentication request), then piatest on what the Switch sends.
