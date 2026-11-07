@@ -473,6 +473,9 @@ int main(int argc, char **argv) {
         }
     }
     if (!*host) { fprintf(stderr, "ldnbeacon: --room host[:port] is required\n"); return 2; }
+    /* which code is running: run 11 ran run 10's object file (zip timestamps are local time, the laptop's clock UTC,
+     * so the newer source looked older than the old build and make skipped it) */
+    logf_(0, "ldnbeacon: stage 3 (room <-> air bridge), compiled " __DATE__ " " __TIME__);
     if (channel != 1 && channel != 6 && channel != 11) { fprintf(stderr, "ldnbeacon: channel 1, 6 or 11\n"); return 2; }
     if (!nkeys) { keyfiles[0] = "../keys/prod.keys"; keyfiles[1] = "../keys/ldn.txt"; nkeys = 2; }
     random_bytes(own_device_id, sizeof own_device_id);

@@ -186,6 +186,14 @@ Stage 3 (bridge.c + ldnbeacon): room proxy datagrams for our member (or broadcas
 Switch's IPv4/UDP (unicast to us or group frames) -> room proxy from our room address to the node's room address
 (broadcast for .255 / multicast), protocol number as the host's packets use (3 by default); ARP requests answered with
 the advertised MACs; fragments and non-UDP dropped (logged). bridgetest checks the packets.
+Run 11 (`captures/20261106-beacon-run11/`, meant for stage 3): **stage 3 never ran.** build.log compiled only
+bridge.c and bridgetest.c; ldnbeacon.c (and ccmp.c) kept run 10's object files, and the log's status lines lack the
+bridge counters. Cause: zip timestamps are local time (PDT) and the laptop's clock is UTC, so the new sources looked
+7 h older than the persistent `build/` and make skipped them. So the run repeats run 10: six joins, each Switch
+stay 4.0-4.6 s ending in deauthentication reason 3; in between it sent its gratuitous ARP (169.254.199.2) and IPv6
+noise, no IPv4 UDP, and we sent it nothing but the authentication responses (ccmptest with the logged data key: 41
+frames decrypt, 6 + 6 LDN, 6 ARP, 23 IPv6). Fixed: RUN.txt builds clean (`unzip -DD`, `rm -rf build`), and ldnbeacon
+logs "stage 3 ..., compiled <date time>" at start, so a stale binary shows in the log.
 If the Switch lists nothing: it may scan actively (probe requests in the log; answer them), or the card may refuse
 injection on mon0 (status line: frames sent / failed).
 
