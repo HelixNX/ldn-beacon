@@ -80,6 +80,48 @@ size_t ldn_auth_response(const LdnKeys *k, const LdnAuthRequest *r, u8 status, c
     return w.err ? 0 : PAYLOAD + size;
 }
 
+size_t ldn_auth_request(const LdnKeys *k, u8 version, const u8 session_info[32], const u8 server_random[16],
+                        const u8 client_random[16], const char *user_name, u16 app_version, u8 platform,
+                        const u8 token[8], const u8 nonce[8], const u8 device_id[8], u8 *out, size_t cap) {
+    size_t size = REQ_CHALLENGE + 0x300;
+    if (cap < PAYLOAD + size) return 0;
+    memset(out, 0, PAYLOAD + size);
+    Wr w = wr_init(out, cap);
+    static const u8 oui[3] = {0x00, 0x22, 0xAA};
+    wr_bytes(&w, oui, 3);
+    wr_be16(&w, LDN_PKT_AUTH);
+    wr_zero(&w, 1);
+    wr_u8(&w, version);
+    wr_u8(&w, (u8)size);
+    wr_u8(&w, 0);                                           /* status */
+    wr_u8(&w, 0);                                           /* request */
+    wr_u8(&w, (u8)(size >> 8));
+    wr_zero(&w, 3);
+    wr_bytes(&w, session_info, 32);
+    wr_bytes(&w, server_random, 16);
+    wr_bytes(&w, client_random, 16);
+    u8 *pl = out + PAYLOAD;
+    size_t nl = strlen(user_name);
+    memcpy(pl, user_name, nl > 32 ? 32 : nl);
+    pl[0x20] = (u8)(app_version >> 8);                      /* big-endian */
+    pl[0x21] = (u8)app_version;
+    pl[0x22] = platform;
+    u8 *c = pl + REQ_CHALLENGE;                             /* 0x300: u32 0, HMAC, 12 pad, then the body from 0x30 */
+    c[0x34] = 0;                                            /* flags; 0x32 / 0x33 (parameter counts) 0 */
+    memcpy(c + 0x38, token, 8);
+    memcpy(c + 0x40, nonce, 8);
+    memcpy(c + 0x48, device_id, 8);
+    hmac_sha256(k->challenge_hmac, 32, c + 0x30, 0x300 - 0x30, c + 4);
+    return w.err ? 0 : PAYLOAD + size;
+}
+
+int ldn_auth_response_status(const u8 *p, size_t n, u8 client_random_out[16]) {
+    if (n < PAYLOAD || p[0] != 0x00 || p[1] != 0x22 || p[2] != 0xAA || (p[3] << 8 | p[4]) != LDN_PKT_AUTH || p[9] != 1)
+        return -1;
+    if (client_random_out) memcpy(client_random_out, p + HDR + 0x30, 16);
+    return p[8];
+}
+
 size_t ldn_disconnect(u8 reason, u8 *out, size_t cap) {
     if (cap < 0x26) return 0;
     memset(out, 0, 0x26);

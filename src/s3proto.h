@@ -9,7 +9,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define S3_PROTO_VERSION 3
+#define S3_PROTO_VERSION 4
 #define S3_MAX_PAYLOAD 2400                 /* an 802.11 frame plus our small headers */
 #define S3_MAX_WIRE (S3_MAX_PAYLOAD + 3 + (S3_MAX_PAYLOAD + 3) / 254 + 2)
 
@@ -23,7 +23,11 @@ enum {
     S3_FILTER = 0x06,       /* u8: 0 frames that concern our BSSID / consoles, 1 everything heard */
     S3_CLOSE = 0x07,        /* Wi-Fi stopped */
     S3_TX_ETH = 0x08,       /* S3TxHdr + an Ethernet frame (destination, source, EtherType, payload): sent as data from
-                             * the AP, encrypted by the S3's hardware with the station's key (S3Ap.ldn) */
+                             * the AP, encrypted by the S3's hardware with the station's key (S3Ap.ldn); with
+                             * S3_TX_STA from our station to the network we joined (S3_JOIN) */
+    S3_JOIN = 0x09,         /* S3Join: leave AP mode and join a console's network as a station; -> S3_AP_DONE (the
+                             * connect started), then S3_LINK */
+    S3_LEAVE = 0x0A,        /* disconnect, back to the placeholder AP */
     /* S3 -> desktop */
     S3_HELLO = 0x81,        /* S3Hello */
     S3_RX = 0x82,           /* S3RxHdr + the frame (no FCS) */
@@ -32,6 +36,7 @@ enum {
     S3_LOG = 0x85,          /* text: the firmware's and ESP-IDF's log lines */
     S3_STATS = 0x86,        /* S3Stats, every 2 s while open */
     S3_AP_DONE = 0x87,      /* S3ApDone */
+    S3_LINK = 0x88,         /* S3StaLink: our station joined (keys in) or lost the network */
 };
 
 #pragma pack(push, 1)
@@ -40,6 +45,7 @@ typedef struct S3Hello {
     uint8_t ap_mac[6];      /* the AP interface's address: the network's BSSID */
     char build[24];         /* the firmware's compile date and time */
     char idf[24];           /* ESP-IDF version */
+    uint8_t sta_mac[6];     /* the station interface's address (S3_JOIN) */
 } S3Hello;
 
 typedef struct S3Open {
@@ -69,7 +75,7 @@ typedef struct S3ApDone {
     int32_t err;            /* esp_err_t, 0 ok */
 } S3ApDone;
 
-enum { S3_TX_UNICAST = 1 };
+enum { S3_TX_UNICAST = 1, S3_TX_STA = 2 };
 typedef struct S3TxHdr {
     uint16_t id;
     uint8_t flags;
@@ -97,6 +103,22 @@ typedef struct S3Sta {
     uint8_t aid;
     uint16_t reason;        /* left: the 802.11 / ESP-IDF reason */
 } S3Sta;
+
+/* join a console's LDN network: it does no 4-way handshake, so on association the S3 installs ldn_key as the
+ * pairwise and group key itself and calls the handshake done */
+typedef struct S3Join {
+    uint8_t channel;
+    uint8_t bssid[6];       /* the host console */
+    uint8_t ssid_len;
+    char ssid[32];          /* the session id's 32 hex digits */
+    uint8_t ldn_key[16];
+} S3Join;
+
+typedef struct S3StaLink {
+    uint8_t up;             /* 1 associated and keyed, 0 lost */
+    uint8_t bssid[6];
+    uint16_t reason;        /* lost: ESP-IDF's reason */
+} S3StaLink;
 
 typedef struct S3Stats {
     uint32_t rx_heard, rx_sent, rx_dropped;     /* dropped: the queue to USB was full */

@@ -12,3 +12,12 @@ CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=64
 CONFIG_ESP_WIFI_AMPDU_TX_ENABLED=n
 CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=n
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+# a panic saves a core dump to flash (partitions.csv): `idf.py -p <port> coredump-info` gives the backtrace (the panic
+# text itself goes to UART0, which nobody reads)
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
+# the default event loop's task runs our Wi-Fi event handler, and ESP-IDF's log lines pass through log_vprintf (about
+# 650 bytes of buffers): 2304 bytes overflowed (join run 6, 2026-11-07, core dump: stack overflow in sys_evt)
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096

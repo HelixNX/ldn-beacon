@@ -30,6 +30,9 @@ typedef struct Radio {
     int fd;
     bool mon_added;
     int ap_pid;
+    /* our station (s3, joining a console's network): its address, and the link coming up (keys in) or going */
+    u8 sta_mac[6];
+    void (*on_link)(const u8 bssid[6], bool up, u16 reason);
     /* s3 */
     struct S3Link *s3;
 } Radio;
@@ -87,6 +90,14 @@ bool s3_radio_send_ex(Radio *r, const u8 *frame, size_t n, bool unicast, bool en
 bool s3_radio_send_eth(Radio *r, const u8 dest[6], const u8 src[6], u16 ethertype, const u8 *p, size_t n);
 size_t s3_radio_recv(Radio *r, u8 *buf, size_t cap, const u8 **frame);
 bool s3_ap_start(Radio *r, const ApConfig *c, char *err, size_t errn);
+/* the S3 to another channel (placeholder AP, promiscuous receive) */
+bool s3_set_channel(Radio *r, u8 channel, char *err, size_t errn);
+/* join a console's LDN network as a station (ssid: the session id's hex digits; key: the data key); the link comes up
+ * later (on_link) */
+bool s3_join(Radio *r, u8 channel, const u8 bssid[6], const char *ssid, const u8 key[16], char *err, size_t errn);
+void s3_leave(Radio *r);
+/* an Ethernet frame from our station, encrypted by the S3 with the data key */
+bool s3_send_eth_sta(Radio *r, const u8 dest[6], u16 ethertype, const u8 *p, size_t n);
 void s3_ap_stop(Radio *r);
 bool s3_ap_running(Radio *r);
 

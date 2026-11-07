@@ -29,6 +29,12 @@
 
 static const char *TAG = "ldns3";
 
+/* where the firmware was when it last died: kept across a reset (the panic text goes to UART0, which nobody reads), and
+ * reported with the reset reason at boot */
+#include "esp_attr.h"
+static RTC_NOINIT_ATTR uint32_t crumb, crumb_magic;
+#define CRUMB(x) (crumb = (x), crumb_magic = 0x1d5c0ffe)
+
 /* ---- messages to the desktop: one queue, one writer task -------------------------------------------------- */
 typedef struct Msg {
     uint8_t type;
@@ -73,6 +79,8 @@ static void writer_task(void *arg) {
 /* ESP-IDF's log, also to the desktop: the Wi-Fi library writes a line in pieces ("wifi:", then the text), so pieces
  * collect until a newline (one buffer for all tasks: lines from two tasks at once could mix, rarely) */
 static vprintf_like_t uart_vprintf;
+static volatile bool join_mode;
+static QueueHandle_t keyq;
 static portMUX_TYPE log_mux = portMUX_INITIALIZER_UNLOCKED;
 static char log_line[240];
 static size_t log_len;
@@ -103,6 +111,10 @@ static int log_vprintf(const char *fmt, va_list ap) {
         }
         taskEXIT_CRITICAL(&log_mux);
         if (out_len) post(S3_LOG, out, out_len);
+        if (join_mode && keyq && strstr(piece, "assoc -> run")) {     /* see join_trigger */
+            uint8_t item[7] = {1};
+            xQueueSend(keyq, item, 0);
+        }
     }
     return uart_vprintf ? uart_vprintf(fmt, ap) : n;
 }
@@ -146,7 +158,6 @@ int __wrap_wpa_auth_sta_associated(struct wpa_authenticator *wpa_auth, struct wp
  * comes (first Switch run, 2026-11-07: associated, no event, no key, its frames failed decryption in the hardware and
  * it left after 1.07 s). So the association itself (hostap_new_assoc_sta: `bssid` is the station's address) hands
  * the station to key_task, which installs the keys shortly after (the association response first). */
-static QueueHandle_t keyq;
 bool __real_hostap_new_assoc_sta(struct sta_info *sta, uint8_t *bssid, uint8_t *wpa_ie, uint8_t wpa_ie_len,
                                  uint8_t *rsnxe, uint16_t rsnxe_len, bool *pmf_enable, int subtype,
                                  uint8_t *pairwise_cipher, uint8_t *reason);
@@ -156,21 +167,24 @@ bool __wrap_hostap_new_assoc_sta(struct sta_info *sta, uint8_t *bssid, uint8_t *
     bool ok = __real_hostap_new_assoc_sta(sta, bssid, wpa_ie, wpa_ie_len, rsnxe, rsnxe_len, pmf_enable, subtype,
                                           pairwise_cipher, reason);
     if (ok && ldn_mode && bssid && keyq) {
-        uint8_t mac[6];
-        memcpy(mac, bssid, 6);
-        xQueueSend(keyq, mac, 0);
+        uint8_t item[7] = {0};
+        memcpy(item + 1, bssid, 6);
+        xQueueSend(keyq, item, 0);
     }
     return ok;
 }
 
 static void ldn_station_keys(const uint8_t mac[6]);
+static void ldn_join_keys(const uint8_t bssid[6]);
+static void join_trigger(void);
 static void key_task(void *arg) {
     (void)arg;
     for (;;) {
-        uint8_t mac[6];
-        if (xQueueReceive(keyq, mac, portMAX_DELAY) != pdTRUE) continue;
+        uint8_t item[7];                            /* 0: a station joined our AP, 1: we joined a console's network */
+        if (xQueueReceive(keyq, item, portMAX_DELAY) != pdTRUE) continue;
         vTaskDelay(pdMS_TO_TICKS(10));
-        ldn_station_keys(mac);
+        if (item[0]) join_trigger();
+        else ldn_station_keys(item + 1);
     }
 }
 
@@ -189,6 +203,57 @@ static void ldn_station_keys(const uint8_t mac[6]) {
     post(S3_STA, &s, sizeof s);
 }
 
+/* ---- joining a console's network as a station (S3_JOIN) ----------------------------------------------------------
+ * The console (the host) does no 4-way handshake either: its stations use the data key at once. ESP-IDF's station
+ * would wait for 4-way message 1 and give up, so once associated (supplicant_sta_conn_handler, wrapped) the data key
+ * goes in as the pairwise key (index 0) and the group key (index 1, as kinnay's LDN library and the Switch use) and the
+ * supplicant is told the negotiation is complete (which cancels its timeout and opens the data path). */
+struct wpa_sm;
+extern struct wpa_sm gWpaSm;
+extern void wpa_supplicant_key_neg_complete(struct wpa_sm *sm, const uint8_t *addr, int secure);
+extern int esp_wifi_set_sta_key_internal(int alg, uint8_t *addr, int key_idx, int set_tx, uint8_t *seq,
+                                         size_t seq_len, uint8_t *key, size_t key_len, int key_flag);
+enum { KF_RX = 1 << 2, KF_TX = 1 << 3, KF_GROUP = 1 << 4, KF_PAIRWISE = 1 << 5 };   /* esp_wifi_driver.h's key_flag */
+
+static uint8_t join_bssid[6];
+
+/* When: ESP-IDF tells the supplicant nothing at association (supplicant_sta_conn_handler comes only after a 4-way
+ * handshake: join run 2, 2026-11-07, it never ran), so the Wi-Fi library's own log line "state: assoc -> run" is the
+ * trigger (log_vprintf queues it to key_task). Where: the keys and the "negotiation complete" go in from the
+ * supplicant's event loop (its timeouts run in the Wi-Fi task, as its 4-way handshake would), 10 ms later; called
+ * from key_task itself the S3 hung (join run 1: no more USB traffic, the desktop's write blocked). */
+extern int eloop_register_timeout(unsigned int secs, unsigned int usecs, void (*handler)(void *, void *),
+                                  void *eloop_data, void *user_data);
+static uint8_t joined_bssid[6];
+static void join_keys_cb(void *a, void *b) {
+    (void)a;
+    (void)b;
+    if (join_mode) ldn_join_keys(joined_bssid);
+}
+
+static void join_trigger(void) {
+    memcpy(joined_bssid, join_bssid, 6);
+    int rc = eloop_register_timeout(0, 10000, join_keys_cb, NULL, NULL);
+    ESP_LOGI(TAG, "ldn: associated with " MACSTR ", keys in 10 ms (eloop %d)", MAC2STR(join_bssid), rc);
+}
+
+static void ldn_join_keys(const uint8_t bssid[6]) {
+    uint8_t a[6], k1[16], k2[16], seq1[6] = {0}, seq2[6] = {0};
+    memcpy(a, bssid, 6);
+    memcpy(k1, ldn_key, 16);
+    memcpy(k2, ldn_key, 16);
+    int e1 = esp_wifi_set_sta_key_internal(ALG_CCMP, a, 0, 1, seq1, 6, k1, 16, KF_PAIRWISE | KF_RX | KF_TX);
+    int e2 = esp_wifi_set_sta_key_internal(ALG_CCMP, a, 1, 0, seq2, 6, k2, 16, KF_GROUP | KF_RX);
+    CRUMB(0x41);
+    wpa_supplicant_key_neg_complete(&gWpaSm, a, 1);
+    CRUMB(0);
+    ESP_LOGI(TAG, "ldn: joined " MACSTR ": data key installed (pairwise %d, group %d), negotiation complete",
+             MAC2STR(bssid), e1, e2);
+    S3StaLink l = {.up = 1};
+    memcpy(l.bssid, bssid, 6);
+    post(S3_LINK, &l, sizeof l);
+}
+
 /* ---- the radio ---------------------------------------------------------------------------------------------- */
 static uint8_t bssid[6];
 static volatile uint8_t filter_all;
@@ -202,6 +267,8 @@ static bool wanted(const uint8_t *f, size_t n) {
     if (n < 24) return false;
     uint8_t type = (f[0] >> 2) & 3, sub = f[0] >> 4;
     if (!memcmp(f + 4, bssid, 6) || !memcmp(f + 16, bssid, 6) || !memcmp(f + 10, bssid, 6)) return true;
+    if (join_mode && (!memcmp(f + 4, join_bssid, 6) || !memcmp(f + 16, join_bssid, 6) || !memcmp(f + 10, join_bssid, 6)))
+        return true;
     if (type == 0 && sub == 4) return true;
     if (type == 0 && sub == 13 && n >= 28 && f[24] == 0x7F && f[25] == 0x00 && f[26] == 0x22 && f[27] == 0xAA) return true;
     return false;
@@ -236,6 +303,17 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         memcpy(s.mac, e->mac, 6);
         s.aid = e->aid;
         s.reason = e->reason;
+    } else if (id == WIFI_EVENT_STA_DISCONNECTED) {
+        const wifi_event_sta_disconnected_t *e = data;
+        S3StaLink l = {.up = 0, .reason = e->reason};
+        memcpy(l.bssid, e->bssid, 6);
+        post(S3_LINK, &l, sizeof l);
+        return;
+    } else if (id == WIFI_EVENT_STA_CONNECTED) {
+        CRUMB(0x30);
+        (void)data;                                 /* no log here: sys_evt's stack is small (see sdkconfig.defaults) */
+        CRUMB(0x31);
+        return;
     } else
         return;
     post(S3_STA, &s, sizeof s);
@@ -312,8 +390,10 @@ static esp_err_t wifi_open(const S3Open *o) {
     return err;
 }
 
+static void sta_leave(void);
 static void wifi_close(void) {
     if (!wifi_on) return;
+    sta_leave();
     esp_wifi_set_promiscuous(false);
     set_vendor_ie(NULL, 0);
     esp_wifi_stop();
@@ -321,9 +401,71 @@ static void wifi_close(void) {
     logline("closed");
 }
 
+/* the Wi-Fi library hands a connected interface's data to its receive callback: with none registered (we run no
+ * network stack) the S3 panicked right after our station connected (join run 4: reset reason 4, last crumb 0x30).
+ * Promiscuous receive already gives the desktop every frame, so these are only counted and freed. */
+static volatile uint32_t if_rx;
+static esp_err_t if_rx_cb(void *buffer, uint16_t len, void *eb) {
+    (void)buffer;
+    (void)len;
+    if_rx++;
+    esp_wifi_internal_free_rx_buffer(eb);
+    return ESP_OK;
+}
+
+static esp_err_t sta_join(const S3Join *j) {
+    static uint8_t assoc_ie[2 + 6] = {0xDD, 6, 0x00, 0x22, 0xAA, 0x10, 0x01, 0x02};  /* Nintendo's, as a Switch's */
+    static const char hex[] = "0123456789abcdef";
+    set_vendor_ie(NULL, 0);                         /* the AP's, and ours from an earlier join */
+    esp_wifi_set_vendor_ie(false, WIFI_VND_IE_TYPE_PROBE_REQ, WIFI_VND_IE_ID_0, NULL);
+    esp_wifi_set_vendor_ie(false, WIFI_VND_IE_TYPE_ASSOC_REQ, WIFI_VND_IE_ID_0, NULL);
+    memcpy(ldn_key, j->ldn_key, 16);
+    memcpy(join_bssid, j->bssid, 6);
+    join_mode = true;
+    esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
+    if (err != ESP_OK) return err;
+    wifi_config_t c = {0};
+    size_t n = j->ssid_len > 32 ? 32 : j->ssid_len;
+    memcpy(c.sta.ssid, j->ssid, n);
+    c.sta.bssid_set = 1;
+    memcpy(c.sta.bssid, j->bssid, 6);
+    c.sta.channel = j->channel;
+    c.sta.scan_method = WIFI_FAST_SCAN;
+    c.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    for (int i = 0; i < 16; i++) {                  /* any passphrase: no handshake happens */
+        c.sta.password[2 * i] = (uint8_t)hex[j->ldn_key[i] >> 4];
+        c.sta.password[2 * i + 1] = (uint8_t)hex[j->ldn_key[i] & 15];
+    }
+    c.sta.pmf_cfg.required = false;
+    err = esp_wifi_set_config(WIFI_IF_STA, &c);
+    esp_wifi_internal_reg_rxcb(WIFI_IF_STA, if_rx_cb);
+    if (err == ESP_OK) {
+        esp_wifi_set_vendor_ie(true, WIFI_VND_IE_TYPE_PROBE_REQ, WIFI_VND_IE_ID_0, assoc_ie);
+        esp_wifi_set_vendor_ie(true, WIFI_VND_IE_TYPE_ASSOC_REQ, WIFI_VND_IE_ID_0, assoc_ie);
+        esp_wifi_set_promiscuous(true);
+        cur_channel = j->channel;
+        err = esp_wifi_connect();
+    }
+    logline("join: " MACSTR " \"%.*s\" channel %u: %s", MAC2STR(j->bssid), (int)n, j->ssid, j->channel,
+            esp_err_to_name(err));
+    return err;
+}
+
+static void sta_leave(void) {
+    if (!join_mode) return;
+    join_mode = false;
+    esp_wifi_disconnect();
+    esp_wifi_set_vendor_ie(false, WIFI_VND_IE_TYPE_PROBE_REQ, WIFI_VND_IE_ID_0, NULL);
+    esp_wifi_set_vendor_ie(false, WIFI_VND_IE_TYPE_ASSOC_REQ, WIFI_VND_IE_ID_0, NULL);
+    esp_wifi_set_mode(WIFI_MODE_AP);
+    placeholder(cur_channel);
+    logline("left the network, back to the placeholder AP");
+}
+
 static void send_hello(void) {
     S3Hello h = {.version = S3_PROTO_VERSION};
     memcpy(h.ap_mac, bssid, 6);
+    esp_read_mac(h.sta_mac, ESP_MAC_WIFI_STA);
     snprintf(h.build, sizeof h.build, "%s %s", __DATE__, __TIME__);
     snprintf(h.idf, sizeof h.idf, "%s", esp_get_idf_version());
     post(S3_HELLO, &h, sizeof h);
@@ -377,7 +519,9 @@ static void handle(uint8_t type, const uint8_t *p, size_t n) {
             memcpy(&h, p, sizeof h);
             static uint8_t eth[S3_MAX_PAYLOAD];
             memcpy(eth, p + sizeof h, n - sizeof h);
-            int err = esp_wifi_internal_tx(WIFI_IF_AP, eth, (uint16_t)(n - sizeof h));
+            CRUMB(h.flags & S3_TX_STA ? 0x51 : 0x50);
+            int err = esp_wifi_internal_tx(h.flags & S3_TX_STA ? WIFI_IF_STA : WIFI_IF_AP, eth, (uint16_t)(n - sizeof h));
+            CRUMB(0);
             if (err == ESP_OK) tx_ok++;
             else {
                 tx_fail++;
@@ -385,6 +529,17 @@ static void handle(uint8_t type, const uint8_t *p, size_t n) {
                 post(S3_TX_FAIL, &f, sizeof f);
             }
         }
+        break;
+    case S3_JOIN:
+        if (n >= sizeof(S3Join)) {
+            S3Join j;
+            memcpy(&j, p, sizeof j);
+            S3ApDone d = {wifi_on ? sta_join(&j) : ESP_ERR_WIFI_NOT_STARTED};
+            post(S3_AP_DONE, &d, sizeof d);
+        }
+        break;
+    case S3_LEAVE:
+        if (wifi_on) sta_leave();
         break;
     case S3_FILTER:
         if (n >= 1) filter_all = p[0];
@@ -434,7 +589,7 @@ void app_main(void) {
     usb_serial_jtag_driver_config_t uc = {.tx_buffer_size = 16384, .rx_buffer_size = 8192};
     ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&uc));
     outq = xQueueCreate(48, sizeof(Msg *));
-    keyq = xQueueCreate(8, 6);
+    keyq = xQueueCreate(8, 7);
     xTaskCreatePinnedToCore(key_task, "ldn_keys", 3072, NULL, 4, NULL, 1);
     uart_vprintf = esp_log_set_vprintf(log_vprintf);
     xTaskCreatePinnedToCore(writer_task, "usb_tx", 4096, NULL, 5, NULL, 1);
@@ -449,6 +604,9 @@ void app_main(void) {
 
     xTaskCreatePinnedToCore(reader_task, "usb_rx", 4096, NULL, 6, NULL, 1);
     xTaskCreatePinnedToCore(stats_task, "stats", 3072, NULL, 3, NULL, 1);
-    ESP_LOGI(TAG, "ldns3 up, BSSID " MACSTR ", ESP-IDF %s", MAC2STR(bssid), esp_get_idf_version());
+    ESP_LOGI(TAG, "ldns3 up, BSSID " MACSTR ", ESP-IDF %s, reset reason %d, last crumb %s%02lx", MAC2STR(bssid),
+             esp_get_idf_version(), (int)esp_reset_reason(), crumb_magic == 0x1d5c0ffe ? "" : "(none) ",
+             crumb_magic == 0x1d5c0ffe ? (unsigned long)crumb : 0ul);
+    CRUMB(0);
     send_hello();
 }

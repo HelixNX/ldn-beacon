@@ -234,6 +234,15 @@ static bool handle_other(Radio *r, u8 type, const u8 *p, size_t n) {
             }
         }
         return true;
+    case S3_LINK:
+        if (n >= sizeof(S3StaLink)) {
+            S3StaLink k;
+            memcpy(&k, p, sizeof k);
+            if (k.up) logf_(0, "s3: our station is in " MAC_FMT "'s network (keys in)", MAC_ARG(k.bssid));
+            else logf_(0, "s3: our station lost " MAC_FMT " (reason %u)", MAC_ARG(k.bssid), k.reason);
+            if (r->on_link) r->on_link(k.bssid, k.up, k.reason);
+        }
+        return true;
     case S3_HELLO:
         if (n >= sizeof(S3Hello)) memcpy(&l->hello, p, sizeof l->hello);
         logf_(0, "s3: the radio restarted (hello again): its AP is gone until the beacon reopens");
@@ -299,6 +308,7 @@ bool s3_radio_open(Radio *r, const char *port, u8 channel, bool filter_all, char
         return false;
     }
     memcpy(r->mac, l->hello.ap_mac, 6);
+    memcpy(r->sta_mac, l->hello.sta_mac, 6);
     S3Open o = {.channel = channel, .filter = filter_all};
     S3ApDone d = {-1};
     if (!s3_send(l, S3_OPEN, &o, sizeof o) || !s3_wait(r, S3_AP_DONE, 5000) || l->wait_len < sizeof d ||
@@ -433,3 +443,50 @@ void s3_ap_stop(Radio *r) {
 }
 
 bool s3_ap_running(Radio *r) { return r->s3 && r->s3->ap_up; }
+
+bool s3_set_channel(Radio *r, u8 channel, char *err, size_t errn) {
+    struct S3Link *l = r->s3;
+    S3Open o = {.channel = channel, .filter = 0};
+    S3ApDone d = {-1};
+    if (!l || !s3_send(l, S3_OPEN, &o, sizeof o) || !s3_wait(r, S3_AP_DONE, 5000) || l->wait_len < sizeof d ||
+        (memcpy(&d, l->wait_buf, sizeof d), d.err)) {
+        snprintf(err, errn, "the S3 did not move to channel %u (esp_err 0x%x)", channel, (unsigned)d.err);
+        return false;
+    }
+    return true;
+}
+
+bool s3_join(Radio *r, u8 channel, const u8 bssid[6], const char *ssid, const u8 key[16], char *err, size_t errn) {
+    struct S3Link *l = r->s3;
+    S3Join j = {.channel = channel, .ssid_len = (u8)strlen(ssid)};
+    memcpy(j.bssid, bssid, 6);
+    memcpy(j.ssid, ssid, j.ssid_len > 32 ? 32 : j.ssid_len);
+    memcpy(j.ldn_key, key, 16);
+    S3ApDone d = {-1};
+    if (!l || !s3_send(l, S3_JOIN, &j, sizeof j) || !s3_wait(r, S3_AP_DONE, 5000) || l->wait_len < sizeof d ||
+        (memcpy(&d, l->wait_buf, sizeof d), d.err)) {
+        snprintf(err, errn, "the S3 did not start joining " MAC_FMT " (esp_err 0x%x)", MAC_ARG(bssid), (unsigned)d.err);
+        return false;
+    }
+    l->ap_up = false;
+    return true;
+}
+
+void s3_leave(Radio *r) {
+    if (r->s3) s3_send(r->s3, S3_LEAVE, NULL, 0);
+}
+
+bool s3_send_eth_sta(Radio *r, const u8 dest[6], u16 ethertype, const u8 *p, size_t n) {
+    static u8 msg[S3_MAX_PAYLOAD];
+    struct S3Link *l = r->s3;
+    if (!l || sizeof(S3TxHdr) + 14 + n > sizeof msg) return false;
+    S3TxHdr h = {.id = l->tx_id++, .flags = (u8)(S3_TX_STA | (dest[0] & 1 ? 0 : S3_TX_UNICAST))};
+    memcpy(msg, &h, sizeof h);
+    u8 *e = msg + sizeof h;
+    memcpy(e, dest, 6);
+    memcpy(e + 6, r->sta_mac, 6);
+    e[12] = (u8)(ethertype >> 8);
+    e[13] = (u8)ethertype;
+    memcpy(e + 14, p, n);
+    return s3_send(l, S3_TX_ETH, msg, sizeof h + 14 + n);
+}

@@ -39,6 +39,17 @@ bool ldn_auth_parse(const LdnKeys *k, const u8 *p, size_t n, LdnAuthRequest *r);
 size_t ldn_auth_response(const LdnKeys *k, const LdnAuthRequest *r, u8 status, const u8 own_device_id[8], u32 flags,
                          u8 *out, size_t cap);
 
+/* A station's request (joining a console's network; the layout as kinnay's LDN library builds it, behaviour only, and
+ * as a Switch's requests are, run 7). session_info: as sent (little-endian fields); token: the 8 bytes for the
+ * challenge (kinnay reads the advertisement's token big-endian and writes it little-endian, i.e. reversed); flags 0,
+ * no parameter lists. Returns the size from the OUI on, 0 if cap is too small. */
+size_t ldn_auth_request(const LdnKeys *k, u8 version, const u8 session_info[32], const u8 server_random[16],
+                        const u8 client_random[16], const char *user_name, u16 app_version, u8 platform,
+                        const u8 token[8], const u8 nonce[8], const u8 device_id[8], u8 *out, size_t cap);
+
+/* a response to our request (from the OUI on): its status, or -1 if not an authentication response */
+int ldn_auth_response_status(const u8 *p, size_t n, u8 client_random_out[16]);
+
 /* the host's disconnect frame (from the OUI on), 0x26 bytes */
 size_t ldn_disconnect(u8 reason, u8 *out, size_t cap);
 
