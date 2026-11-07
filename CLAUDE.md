@@ -125,6 +125,14 @@ on the home Wi-Fi in the background) sent probe requests on channels 6 and 1 ask
 read and decrypted our advertisement, then probed for the network by name to join; we did not answer, so "can't find
 the group". Each search sends pairs: a wildcard probe and one for that SSID. Added: probe responses (the beacon's
 body with the SSID, no TIM, to the asker). Next: the Switch's authentication / association (stage 2).
+Run 5 (channel 11, `captures/20261106-beacon-run5/`): the probe answered, the Switch then sent Open System
+authentication (algorithm 0, sequence 1) to our BSSID, 42 times in ~1 s with the retry bit: nothing ACKs it (a monitor
+interface does not, and the MT7925 has no ACTIVE_MONITOR extended feature: `iw phy` lists none). So stage 2 cannot be
+done with injected frames alone on this card. Plan (asked the user): hostapd AP on the card (hardware ACKs, auth /
+association, WPA2 4-way handshake and CCMP; ignore_broadcast_ssid=2 gives the Switch's zero-filled SSID; vendor
+elements for Nintendo's), advertisements still injected on mon0, the LDN authentication as EtherType 0x88B7 frames on
+the AP interface. Unknown: the WPA2 key (candidate: from the data key); a wrong guess still yields the Switch's
+EAPOL message 2 in a capture, to test candidates offline. Alternative: an adapter with active monitor.
 If the Switch lists nothing: it may scan actively (probe requests in the log; answer them), or the card may refuse
 injection on mon0 (status line: frames sent / failed).
 
