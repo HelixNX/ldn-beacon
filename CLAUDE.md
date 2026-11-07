@@ -1,6 +1,6 @@
 # ldn-beacon
 
-A real Switch's local play (LDN: Wi-Fi action frames plus a WPA2 network) bridged into a multiplayer room in the
+A real Switch's local play (LDN: Wi-Fi action frames plus its own network) bridged into a multiplayer room in the
 protocol Citra, yuzu and Eden rooms speak (nxrecomp's `tools/room/room_server.c`, ours). The desktop runs the room
 (and the recomp games, Eden, ...); the beacon runs next to the Switch on a Linux machine with a suitable Wi-Fi card,
 joins the room as one member, and forwards everything between the air and the room. The recomp needs no change: to
@@ -29,33 +29,66 @@ Hardware: the user's laptop (HP Omen MAX 16, MediaTek MT7925, mt7925e / mt76: AP
 USB (Ventoy, persistence), wired to the LAN (the radio is the LDN network). Fallbacks: a Pi 4 with a USB mt76
 adapter (MT7921AU / MT7612U); an ESP32-S3 as a USB radio for the desktop (see below).
 
-Both directions, the first one first:
-1. **Room hosts, Switch joins.** A member's network (ScanResp / SyncNetwork NetworkInfo) is advertised on the air
-   as a console would (action frames, OUI 00:22:AA, channel 1 / 6 / 11) and hosted as a WPA2 access point
-   (hostapd, nl80211); the Switch associates; its Connect becomes an LDN Connect to the host member, SyncNetwork
-   comes back and is sent to it on the air.
-2. **Switch hosts, room joins.** The beacon listens for the Switch's advertisement, answers room Scans with it, and
-   for each member that Connects joins the Switch's network as one more station (a virtual interface per member,
-   limited by the card's interface combinations).
-Data: the games' UDP (Pia) passes through unchanged (end-to-end encrypted by the games). Addresses are translated:
-the Switch's address on its LDN network <-> the beacon's room address; each remote member's room address <-> an
-address on the LDN network (the beacon answers ARP for them and injects / captures frames with AF_PACKET).
+**Priority (the user, 2026-11-06): the room hosts, a real Switch joins** (a Windows recomp hosts a Tera raid in the
+room; raids between two Windows clients already work). Second: the Switch hosts, the room joins.
+1. **Room hosts, Switch joins.** The beacon takes the host member's NetworkInfo (room ScanResp / SyncNetwork) and
+   hosts it on the air as a console would: beacons with a zeroed SSID, the advertisement action frame every 100 ms,
+   then association, LDN authentication (below), and the participant list in later advertisements. The Switch's
+   join becomes an LDN Connect to the host member; its UDP becomes proxy packets. kinnay found AP mode unusable for
+   hosting (broadcast frames to the AP are not received) and IBSS drops association requests: his library hosts
+   with two monitor interfaces (one active, one passive), its own 802.11 handling, and a TAP interface for the data.
+   Plan the same unless hostapd turns out to work on the MT7925.
+2. **Switch hosts, room joins.** The beacon decrypts the Switch's advertisement into a NetworkInfo for room Scans
+   and, for each member that Connects, joins as one more station (802.11 + LDN authentication per member).
+Data: the games' UDP (Pia) passes through unchanged. Addresses are translated: the Switch's 169.254.X.Y <-> the
+beacon's room address; each remote member's room address <-> a 169.254.X.Y on the LDN network.
+
+## Protocol (kinnay's NintendoClients wiki: LDN-Protocol, LDN-Passphrases, Local-Wireless-Communication-on-PC; kinnay/LDN README; read 2026-11-06; behaviour only)
+
+Constants (input keys, the challenge HMAC key, Scarlet / Violet's passphrase) are in `../keys/ldn.txt`, not here.
+Big-endian unless stated.
+- **Advertisement** (vendor action frame to broadcast, every 100 ms): 7f, OUI 00 22 aa, protocol id 4, pad, packet
+  type 0x0101, 2 zero, 2 pad; then the payload: session info (32: u64 local communication id, 2 pad, u16 game mode,
+  4 pad, 16 SSID bytes), u8 LDN version, u8 encryption (1 plain, 2 AES-CTR, 3 AES-GCM), u16 data size, u32 nonce,
+  then (plain / CTR) 32-byte SHA-256 over the whole payload with the hash zeroed, then the data (0x500): 16 server
+  random, u16 security level, u8 accept policy, pad, u16 channel | band << 10, u8 max / current participants,
+  8 x 56-byte participants (u32 ip, mac, connected, platform 0 Switch / 1 Switch 2, 32 user name, u16 app comm
+  version, 10 pad), pad, u16 app data size, 384 app data (Pia's header), pad, 8 auth token at 0x4F8. With CTR the
+  hash and the data are encrypted. GCM (mostly Switch 2 games): 16-byte MAC at 0x28, another layout.
+- **Keys:** dec(master_key_00, aes_kek_generation_source) -> k1; dec(k1, input key) -> k2;
+  dec(k2, aes_key_generation_source) -> k3; key = dec(k3, first 16 bytes of SHA-256(input buffer)). Advertisement:
+  input buffer = the 32-byte session info, the advertisement input key. Data frames: input buffer = server random +
+  the game's passphrase, the data input key. (Cipher for the "dec" steps presumably AES-128-ECB; CTR counter / how
+  the nonce is used: not documented, to be found against the capture.)
+- **Network:** SSID = 32 random hex digits (the session info's 16 bytes), zeroed in beacons; channels 1 / 6 / 11
+  (also 36 / 40 / 44 / 48). Association is open system; our capture's beacon nevertheless has an RSN element
+  (WPA2-PSK, CCMP): the data key is probably the PSK / PMK (to verify).
+- **Authentication** after associating (EtherType 0x88B7 data frames, "usually encrypted"): 00 22 aa, packet type
+  0x0102; LDN version, size, status, request 0 / response 1, size >> 8, pad, session info (little-endian), server
+  random, client random (16), then the request (32 user name, u16 app comm version, platform, ...; v3+: a 0x300
+  challenge, HMAC-SHA256 over 0x30-0x300) or response (platform, ..., 0x100 challenge response, HMAC over
+  0x30-0x100). The station must send it within 5 s; it retries after 700 ms, 3 tries. Status 0 success, 1 denied by
+  policy, 2 malformed, 4 bad version, 5 unexpected, 6 bad challenge. Disconnect: packet type 0x0103, reason 3 / 4 / 5.
+- **IP:** 169.254.X.Y, X random per network, the host .1, broadcast .255; the host assigns Y on joining; stations
+  learn all addresses from the next advertisement's participant list. Frames from the host have FromDS set.
+- **Hardware:** iwlwifi drops action frames once joined (Intel: unusable as a station); mt7921e confirmed working
+  (the MT7925 is the same family).
 
 Captures (`captures/<date>/`, git-ignored; `scripts/capture.sh` makes them, `radio-check.sh` is the older version):
-- 2026-11-06, Omen (MT7925, mt7925e, CachyOS live 260809), wlan0 itself switched to monitor: 19 records per channel
-  in 45 s, all the laptop's own outgoing packets (its IP was still set), not one received frame (no beacons). The
-  card lists AP and monitor modes. Next: capture.sh `vif` (separate mon0, NetworkManager / wpa_supplicant stopped),
-  else the ZBook (Intel; monitor mode known to work there).
-- 2026-11-06 later: `vif` works on the MT7925 (2664 frames, 957 beacons in a 45 s run), but 0 frames matched the
-  Nintendo filter on 1 / 6 / 11 and on 36-48; with wlan0 itself in monitor mode, 0 frames. Both vif runs were lost
-  (the script then cleared old captures; now each run gets its own folder). The filter may be wrong (Action No Ack?
-  another offset?): the raw captures are to be searched for 00:22:AA and Nintendo MAC prefixes.
-- On the live ISO, `pacman -Sy tcpdump` alone left an older libpcap (undefined symbol pcap_findalldevs_ex): install
-  libpcap with it.
+- MT7925 (mt7925e, CachyOS live 260809, kernel 7.1.6): monitor mode only works on a separate interface
+  (`capture.sh ... vif`: mon0, wlan0 down without addresses, NetworkManager / wpa_supplicant stopped); with wlan0
+  itself switched to monitor it receives nothing. On the live ISO install libpcap with tcpdump.
+- **`captures/20261107-032045-vif/`: a real Switch hosting a Violet local session**, channel 11, MAC
+  <the Switch's MAC>: 278 advertisements (1388 bytes, identical: no counter, every ~100 ms; header as above, local
+  communication id 0100A3D008C5C000 = Scarlet's title id, shared by both games; LDN version 4, encryption 2 =
+  AES-CTR, data size 0x500) and 278 beacons (interval 100, SSID 32 zero bytes, rates 1-54, DS channel 11, RSN
+  WPA2-PSK CCMP, HT / HE elements, vendor 00 22 aa 10 01 02, WMM). This is the test vector for the key derivation:
+  decrypting it must give a sane NetworkInfo. capture.sh's tcpdump filter for these frames counted 0 although they
+  are there: to be replaced by a plain byte search.
 
-Open: the network's WPA2 key and the advertisement's encryption (derived from console keys: from `prod.keys`?), the
-advertisement frame layout (the capture from radio-check.sh is the reference), whether mt7925e sends action frames
-from an AP interface, how many station interfaces it allows.
+Next: (1) the advertisement decryption against the capture (keys from ../keys/prod.keys + ../keys/ldn.txt; find the
+CTR counter layout); (2) building our own advertisement + beacon from a room NetworkInfo; (3) hosting: two monitor
+interfaces as kinnay, or hostapd if it receives what it must; association, the authentication exchange, data.
 
 ## ESP32-S3 instead of a laptop (option, not started)
 
