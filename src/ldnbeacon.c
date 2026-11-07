@@ -53,10 +53,10 @@ static const u32 resp_flag_tries[] = {2, 1, 0, 3};
 static int resp_flags_fixed = 2, attempt;          /* run 9: 2, 1 and 0 all ended the same way */
 static u32 attempt_flags;
 static u64 answered_ms;
-/* run 12: the host's broadcasts went out as group frames (key index 1) and the Switch never answered. How room
- * broadcasts reach the Switch: 0 group frames, 1 unicast to its MAC (IP broadcast inside; one station, so the same
- * thing with ACKs and retries), 2 alternate per join attempt (odd: group, even: unicast) */
-static int bcast_mode = 2;
+/* How room broadcasts reach the Switch: 0 group frames, 1 unicast to its MAC (IP broadcast inside; one station, so
+ * the same thing with ACKs and retries), 2 alternate per join attempt (odd: group, even: unicast). Run 13: the
+ * Switch answered none of our group ARP probes and every unicast one, so unicast is the default */
+static int bcast_mode = 1;
 static bool bcast_unicast;
 /* ARP probes from the host (.1) for the Switch's address after each join: group at +500 ms, unicast at +1500 ms */
 static int probes_sent;
@@ -77,6 +77,11 @@ static void on_ldn(const RoomLdn *p, void *ud) {
     net.seen_ms = now_ms();
     if (host_session_update(&net.session, &n)) {
         ldn_data_key(&keys, net.session.server_random, net.data_key);
+        static const u8 zero16[16];
+        char sr[33];
+        for (int i = 0; i < 16; i++) snprintf(sr + 2 * i, 3, "%02x", net.session.server_random[i]);
+        logf_(0, "network: server random = the host's security parameter, %s", memcmp(net.session.server_random,
+              zero16, 16) ? sr : "zero (a recomp host leaves it so)");
         sta.active = sta.in_room = false;               /* a new network: the Switch must join again */
         logf_(0, "network of " IP_FMT ": local communication id %016llx, scene %u, %u of %u nodes, %u bytes of "
                  "advertise data; on the air as 169.254.%u.0/24",
@@ -514,7 +519,7 @@ int main(int argc, char **argv) {
     if (!*host) { fprintf(stderr, "ldnbeacon: --room host[:port] is required\n"); return 2; }
     /* which code is running: run 11 ran run 10's object file (zip timestamps are local time, the laptop's clock UTC,
      * so the newer source looked older than the old build and make skipped it) */
-    logf_(0, "ldnbeacon: stage 3 (room <-> air bridge, broadcast mode %d, ARP probes, high PN), compiled " __DATE__
+    logf_(0, "ldnbeacon: stage 3 (room <-> air bridge, broadcast mode %d, ARP probes, high PN, the host's security parameter), compiled " __DATE__
              " " __TIME__, bcast_mode);
     if (channel != 1 && channel != 6 && channel != 11) { fprintf(stderr, "ldnbeacon: channel 1, 6 or 11\n"); return 2; }
     if (!nkeys) { keyfiles[0] = "../keys/prod.keys"; keyfiles[1] = "../keys/ldn.txt"; nkeys = 2; }

@@ -8,8 +8,13 @@ bool host_session_update(HostSession *s, const LdnNetworkInfo *n) {
     if (!memcmp(id, s->session_id, 16) && memcmp(id, zero, 16)) return false;
     memcpy(s->session_id, id, 16);
     if (!memcmp(id, zero, 16)) random_bytes(s->session_id, 16);    /* a room host without one */
-    random_bytes(s->server_random, 16);
+    /* the server random is the host's security parameter, as it is on a console: the game reads it on both sides
+     * (GetSecurityParameter: it and the session id), and Pia's packets only make sense to a station that got the
+     * host's (run 13: with a made-up one the Switch received the host's Pia packets and never answered). A recomp
+     * host may leave it zero; zero is used then too, for the same reason */
+    memcpy(s->server_random, n->security_parameter, 16);
     random_bytes(s->auth_token, 8);
+    if (n->random_authentication_id) memcpy(s->auth_token, &n->random_authentication_id, 8);
     random_bytes(&s->nonce, 4);
     u8 x;
     random_bytes(&x, 1);

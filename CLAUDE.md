@@ -208,6 +208,17 @@ Next run (ldnbeacon): our PN starts at 0xF000xxxxxxxx (above the Switch's, in ca
 frames to the Switch's MAC with the IP broadcast inside; 0 group only, 1 unicast only); after each join an ARP request
 from the host (.1, BSSID) for the Switch's address as a group frame (+500 ms) and as unicast (+1500 ms), and the
 Switch's ARP replies are logged: which path reaches it. Unicast frames from the host are logged (first 20).
+Run 13 (`captures/20261106-beacon-run13/`): three joins, left after 4.3-4.5 s each. **The Switch answers unicast
+frames and not group frames**: our group ARP probe (+500 ms) was never answered, the unicast one (+1500 ms) at once,
+all three times (group frames had the high PN too). In join 2 (broadcasts as unicast frames) the host's Pia packets
+reached it (ACKed, in the capture: IPv4/UDP 169.254.69.1:12345 -> .255:12345, Pia's magic 32ab9864) and it still sent
+no UDP. Likely cause: the security parameter. nxrecomp's CreateNetwork (Violet's raids) leaves security_parameter
+zero and GetSecurityParameter returns it with the session id; the beacon advertised a made-up server random, so the
+Switch's GetSecurityParameter differed from the host's, and Pia (keyed from it, presumably) could not read the host.
+Next run (ldnbeacon): the advertised server random is the host's security parameter (zero from a recomp; logged at
+start), auth token the host's random_authentication_id when nonzero, broadcasts as unicast frames by default
+(`--bcast-mode 1`). Later in nxrecomp: CreateNetwork should make a random security parameter as a console does
+(not needed for the beacon: it copies whatever the host has).
 If the Switch lists nothing: it may scan actively (probe requests in the log; answer them), or the card may refuse
 injection on mon0 (status line: frames sent / failed).
 
