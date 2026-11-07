@@ -46,6 +46,10 @@ Captures (`captures/<date>/`, git-ignored; `scripts/capture.sh` makes them, `rad
   in 45 s, all the laptop's own outgoing packets (its IP was still set), not one received frame (no beacons). The
   card lists AP and monitor modes. Next: capture.sh `vif` (separate mon0, NetworkManager / wpa_supplicant stopped),
   else the ZBook (Intel; monitor mode known to work there).
+- 2026-11-06 later: `vif` works on the MT7925 (2664 frames, 957 beacons in a 45 s run), but 0 frames matched the
+  Nintendo filter on 1 / 6 / 11 and on 36-48; with wlan0 itself in monitor mode, 0 frames. Both vif runs were lost
+  (the script then cleared old captures; now each run gets its own folder). The filter may be wrong (Action No Ack?
+  another offset?): the raw captures are to be searched for 00:22:AA and Nintendo MAC prefixes.
 - On the live ISO, `pacman -Sy tcpdump` alone left an older libpcap (undefined symbol pcap_findalldevs_ex): install
   libpcap with it.
 

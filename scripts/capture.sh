@@ -7,7 +7,7 @@
 # monitor mode (2026-11-06: only the laptop's own outgoing packets).
 # Host local play on the Switch (e.g. a local Union Circle or raid lobby) for the whole run, close to the laptop.
 # Needs iw and tcpdump: sudo pacman -Sy --needed iw tcpdump libpcap (libpcap too: a newer tcpdump needs it).
-# Writes ~/captures/ch<N>.pcap per channel, card.txt (card, kernel), dmesg.txt (driver messages). NetworkManager / wpa_supplicant are stopped for the
+# Writes ~/captures/<date-time>-<mode>/ch<N>.pcap per channel (a new folder per run), card.txt (card, kernel), dmesg.txt (driver messages). NetworkManager / wpa_supplicant are stopped for the
 # capture (as airmon-ng check kill does) and started again at the end, also on Ctrl+C.
 set -u
 [ "$(id -u)" = 0 ] || { echo "run it with sudo: sudo sh $0"; exit 1; }
@@ -20,9 +20,9 @@ VIF=${3:-}
 CHANNELS=${4:-1 6 11}
 USER_NAME=${SUDO_USER:-root}
 HOME_DIR=$(getent passwd "$USER_NAME" | cut -d: -f6)
-OUT="$HOME_DIR/captures"
+# each run in its own folder, nothing deleted: ~/captures/<date-time>-<vif|novif>
+OUT="$HOME_DIR/captures/$(date +%Y%m%d-%H%M%S)-${VIF:-novif}"
 mkdir -p "$OUT"
-rm -f "$OUT"/ch*.pcap "$OUT"/ch*.err     # nothing left from an earlier run
 tcpdump --version > /dev/null 2>&1 || {
     echo "tcpdump does not start:"; tcpdump --version
     echo "try: sudo pacman -S libpcap"; exit 1; }
@@ -79,4 +79,5 @@ for CH in $CHANNELS; do
 done
 restore
 ls -l "$OUT"
-echo "done: copy $OUT to the USB stick"
+chown -R "$USER_NAME" "$HOME_DIR/captures"
+echo "done: copy ~/captures (every run) to the USB stick"
