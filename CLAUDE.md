@@ -41,6 +41,14 @@ Data: the games' UDP (Pia) passes through unchanged (end-to-end encrypted by the
 the Switch's address on its LDN network <-> the beacon's room address; each remote member's room address <-> an
 address on the LDN network (the beacon answers ARP for them and injects / captures frames with AF_PACKET).
 
+Captures (`captures/<date>/`, git-ignored; `scripts/capture.sh` makes them, `radio-check.sh` is the older version):
+- 2026-11-06, Omen (MT7925, mt7925e, CachyOS live 260809), wlan0 itself switched to monitor: 19 records per channel
+  in 45 s, all the laptop's own outgoing packets (its IP was still set), not one received frame (no beacons). The
+  card lists AP and monitor modes. Next: capture.sh `vif` (separate mon0, NetworkManager / wpa_supplicant stopped),
+  else the ZBook (Intel; monitor mode known to work there).
+- On the live ISO, `pacman -Sy tcpdump` alone left an older libpcap (undefined symbol pcap_findalldevs_ex): install
+  libpcap with it.
+
 Open: the network's WPA2 key and the advertisement's encryption (derived from console keys: from `prod.keys`?), the
 advertisement frame layout (the capture from radio-check.sh is the reference), whether mt7925e sends action frames
 from an AP interface, how many station interfaces it allows.
