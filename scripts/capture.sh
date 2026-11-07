@@ -6,7 +6,8 @@
 # monitor mode (2026-11-06: only the laptop's own outgoing packets).
 # Host local play on the Switch (e.g. a local Union Circle or raid lobby) for the whole run, close to the laptop.
 # Needs iw and tcpdump: sudo pacman -Sy --needed iw tcpdump libpcap (libpcap too: a newer tcpdump needs it).
-# Writes ~/captures/ch1.pcap, ch6.pcap, ch11.pcap, card.txt; Wi-Fi is given back to NetworkManager at the end.
+# Writes ~/captures/ch1.pcap, ch6.pcap, ch11.pcap, card.txt. NetworkManager / wpa_supplicant are stopped for the
+# capture (as airmon-ng check kill does) and started again at the end, also on Ctrl+C.
 set -u
 [ "$(id -u)" = 0 ] || { echo "run it with sudo: sudo sh $0"; exit 1; }
 IF=${1:-}
@@ -35,12 +36,19 @@ restore() {
     ip link set "$IF" down
     iw dev "$IF" set type managed
     ip link set "$IF" up
-    command -v nmcli > /dev/null && nmcli device set "$IF" managed yes
+    for S in $STOPPED; do systemctl start "$S"; done
 }
 trap 'echo; echo "stopped: giving Wi-Fi back"; restore; exit 1' INT TERM
 
+# what airmon-ng's "check kill" does: NetworkManager and wpa_supplicant keep scanning and reconfiguring the card,
+# which can stop a monitor interface from receiving anything; they are started again at the end
+STOPPED=
+for S in NetworkManager wpa_supplicant iwd; do
+    systemctl is-active --quiet "$S" 2> /dev/null && systemctl stop "$S" && STOPPED="$STOPPED $S"
+done
+pkill -x wpa_supplicant 2> /dev/null
+[ -n "$STOPPED" ] && echo "stopped for the capture:$STOPPED"
 command -v rfkill > /dev/null && rfkill unblock wifi
-command -v nmcli > /dev/null && nmcli device set "$IF" managed no
 ip addr flush dev "$IF"                 # no addresses: the laptop's own traffic stays out of the capture
 if [ -n "$VIF" ]; then
     ip link set "$IF" down
