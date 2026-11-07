@@ -20,6 +20,8 @@ bool radio_open(Radio *r, const char *iface, u8 channel, char *err, size_t errn)
 void radio_close(Radio *r);
 /* one 802.11 frame (no FCS); a radiotap header is put in front */
 bool radio_send(Radio *r, const u8 *frame, size_t n);
+/* unicast: the hardware waits for the ACK and retries; encrypted: the frame is already protected (ccmp.c) */
+bool radio_send_ex(Radio *r, const u8 *frame, size_t n, bool unicast, bool encrypted);
 /* the next received frame without its radiotap header, or 0 when none is waiting (non-blocking) */
 size_t radio_recv(Radio *r, u8 *buf, size_t cap, const u8 **frame);
 /* a non-blocking packet socket for one EtherType on the Wi-Fi interface (the AP's side: whole Ethernet frames,

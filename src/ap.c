@@ -37,6 +37,9 @@ bool ap_start(Ap *a, const char *iface, const char ssid[33], u8 channel, const u
             "wpa_key_mgmt=WPA-PSK\n"
             "rsn_pairwise=CCMP\n"
             "max_num_sta=8\n"
+            /* a Switch skips the 4-way handshake (it derives the key itself): keep hostapd from giving up on it and
+             * disconnecting the station after the default 4 tries of message 1 */
+            "wpa_pairwise_update_count=100000\n"
             "vendor_elements=dd060022aa100102\n",
             iface, ssid, channel);
     switch (psk_mode) {

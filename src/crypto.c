@@ -204,3 +204,20 @@ bool ct_equal(const void *a, const void *b, size_t n) {
     for (size_t i = 0; i < n; i++) d |= (u8)(x[i] ^ y[i]);
     return d == 0;
 }
+
+void hmac_sha256(const u8 *key, size_t key_len, const void *data, size_t n, u8 out[32]) {
+    u8 k[64] = {0}, pad[64], inner[32];
+    if (key_len > 64) sha256(key, key_len, k);
+    else memcpy(k, key, key_len);
+    Sha256 s;
+    for (int i = 0; i < 64; i++) pad[i] = (u8)(k[i] ^ 0x36);
+    sha256_init(&s);
+    sha256_update(&s, pad, 64);
+    sha256_update(&s, data, n);
+    sha256_final(&s, inner);
+    for (int i = 0; i < 64; i++) pad[i] = (u8)(k[i] ^ 0x5C);
+    sha256_init(&s);
+    sha256_update(&s, pad, 64);
+    sha256_update(&s, inner, 32);
+    sha256_final(&s, out);
+}

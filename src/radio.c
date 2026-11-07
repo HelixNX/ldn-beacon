@@ -142,10 +142,15 @@ void radio_close(Radio *r) {
     logf_(1, "radio: Wi-Fi given back");
 }
 
-bool radio_send(Radio *r, const u8 *frame, size_t n) {
-    /* radiotap: version 0, length 12, present = flags (0) + TX flags (NOACK; broadcast frames get none anyway) */
+bool radio_send(Radio *r, const u8 *frame, size_t n) { return radio_send_ex(r, frame, n, false, false); }
+
+bool radio_send_ex(Radio *r, const u8 *frame, size_t n, bool unicast, bool encrypted) {
+    /* radiotap: version 0, length 12, present = flags + TX flags. Flags 0x04: already encrypted (mac80211 leaves it
+     * alone); TX flags 0x0008: no ACK expected (broadcast); unicast frames get the hardware's ACK wait and retries */
     u8 buf[4096];
-    static const u8 rt[] = {0x00, 0x00, 0x0C, 0x00, 0x02, 0x80, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00};
+    u8 rt[] = {0x00, 0x00, 0x0C, 0x00, 0x02, 0x80, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00};
+    if (encrypted) rt[8] = 0x04;
+    if (unicast) rt[10] = 0x00;
     if (n + sizeof rt > sizeof buf) return false;
     memcpy(buf, rt, sizeof rt);
     memcpy(buf + sizeof rt, frame, n);

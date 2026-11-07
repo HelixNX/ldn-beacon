@@ -26,6 +26,8 @@ Ryujinx are for behaviour only: our own implementation.
 | `src/frametest.c` | writes those frames for a saved NetworkInfo as a pcap (advdump decodes it); any OS |
 | `src/radio.c` | Linux: mon0 next to the Wi-Fi interface (as capture.sh), services stopped and restored, raw 802.11 send / receive |
 | `src/ap.c` | Linux: hostapd for the network (stage 2): hidden SSID as a Switch's, WPA2 with a guessed key (`--psk-mode`), Nintendo's element, debug log with keys |
+| `src/ccmp.c` | CCMP (AES-CCM) in software: the Switch uses the data key directly, so no key is in the driver; ccmptest checks it against IEEE's vector and decrypts captures |
+| `src/ldnauth.c` | LDN authentication request parse / response build (challenge HMACs); authtest runs it on captured requests |
 | `src/ldnbeacon.c` | Linux, the beacon: joins the room, Scans for a host, puts its network on the air every 100 ms; logs probe requests, joins to us and other consoles |
 | `src/roomtest.c` | joins a room, `--scan` broadcasts LDN Scans and prints the networks hosts answer with (`--dump dir`: their raw NetworkInfo); any OS |
 | `scripts/radio-check.sh` | first radio test on the laptop: card modes, a capture on channels 1 / 6 / 11 |
@@ -134,6 +136,25 @@ association, WPA2 4-way handshake and CCMP; ignore_broadcast_ssid=2 gives the Sw
 elements for Nintendo's), advertisements still injected on mon0, the LDN authentication as EtherType 0x88B7 frames on
 the AP interface. Unknown: the WPA2 key (candidate: from the data key); a wrong guess still yields the Switch's
 EAPOL message 2 in a capture, to test candidates offline. Alternative: an adapter with active monitor.
+Run 7 (`captures/20261106-beacon-run7/`; first --no-ap, which reproduced run 5, then hostapd): with hostapd the
+Switch probed, authenticated once (ACKs work), associated (aid 1); hostapd sent 4-way message 1 twice (ACKed) but
+**the Switch never answers it: there is no 4-way handshake.** Right after associating it sends CCMP-encrypted QoS data
+with **the data key itself as the CCMP key** (ldn_data_key: server random + the game's passphrase; verified: ccmptest
+decrypts all 10 frames, MIC ok, no FCS on mon0). They are the LDN authentication request (LLC/SNAP, EtherType 0x88B7),
+resent every 200 ms (5 times), then the Switch deauthenticates (reason 3). Request as kinnay documents (re-read
+2026-11-06): header 0x0E (OUI, type 0x0102, pad, version 4, size lo 0x64, status, 0 = request, size hi 3, pad 3),
+session info little-endian, server random (ours), client random (new per try), payload 0x364: user name, app version
+21 (big-endian), platform 1, zeros, then the 0x300 challenge (HMAC-SHA256 at 0x4 over 0x30-0x300 with
+ldn_challenge_hmac_key: verified on all 10; P 1, Q 2, flags 2, token = our advertisement's, nonce per try, device id,
+16 unknown bytes). Response (ldnauth.c): platform, pad to 0x84, 0x100 challenge response (flags at 0x34, 4 bytes:
+copied from the request, a guess; nonce and device id echoed, own device id, the 16 unknown bytes copied; HMAC at 0x4
+over 0x30-0x100). authtest builds it from the captured requests and round-trips it through CCMP.
+Stage 2b (ldnbeacon): decrypt the Switch's frames, answer the authentication request (QoS data FromDS, CCMP,
+injected unicast with ACK / retries), send a room Connect as the beacon's member (the recomp adds a node and sends
+SyncNetwork), show the Switch in the advertisement's participant list with its MAC; a deauthentication sends a room
+Disconnect. hostapd keeps its unused message 1 going (wpa_pairwise_update_count=100000) instead of kicking the
+station. Not yet: the data path (ARP for every room member's 169.254 address, IPv4 / UDP <-> room proxy with address
+translation, broadcast frames: their group key is probably the same data key).
 If the Switch lists nothing: it may scan actively (probe requests in the log; answer them), or the card may refuse
 injection on mon0 (status line: frames sent / failed).
 

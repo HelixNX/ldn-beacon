@@ -20,6 +20,7 @@ void sha256_init(Sha256 *s);
 void sha256_update(Sha256 *s, const void *p, size_t n);
 void sha256_final(Sha256 *s, u8 out[32]);
 void sha256(const void *p, size_t n, u8 out[32]);
+void hmac_sha256(const u8 *key, size_t key_len, const void *data, size_t n, u8 out[32]);
 
 /* constant-time compare, returns true when equal */
 bool ct_equal(const void *a, const void *b, size_t n);
