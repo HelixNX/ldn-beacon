@@ -219,6 +219,18 @@ Next run (ldnbeacon): the advertised server random is the host's security parame
 start), auth token the host's random_authentication_id when nonzero, broadcasts as unicast frames by default
 (`--bcast-mode 1`). Later in nxrecomp: CreateNetwork should make a random security parameter as a console does
 (not needed for the beacon: it copies whatever the host has).
+Run 14 (`captures/20261106-beacon-run14/`): server random zero (the host's), broadcasts as unicast frames, unicast
+ARP probe answered: three joins, the Switch got the host's Pia packets and still sent no UDP, left after 4.5-4.6 s.
+**Cause (kinnay's wiki, PIA-Protocol, read 2026-11-07, behaviour only): Pia 6.x cannot pass through address
+translation.** Violet's packets have version byte 0x8B (encrypted, version 11 = Pia 6.16-6.23; header: magic,
+version, u16 destination / source variable id, u16 packet id, u8 footer size, 8-byte nonce, first 8 bytes of the GCM
+tag). LDN mode, 6.16-6.42: the 12-byte GCM nonce is XOR(network id, the source's IP address) + the header's nonce,
+and the session key is AES(game key, the network's SSID). The recomp encrypts with its room address (192.168.1.2)
+and its SSID is Eden's "YuzuFakeSsidForLdn"; the Switch decrypts with 169.254.X.1 and the session id's hex SSID, so
+no packet can authenticate in either direction, whatever the bridge does with frames. (Broadcasts: the footer lists
+the receivers' variable ids.) The fix has to be on the recomp's side (it presents LDN as a console does: 169.254.X
+addresses and the hex SSID) or the beacon re-encrypts every Pia packet (needs the game key and the network id; any
+addresses inside Pia messages would need rewriting too).
 If the Switch lists nothing: it may scan actively (probe requests in the log; answer them), or the card may refuse
 injection on mon0 (status line: frames sent / failed).
 
