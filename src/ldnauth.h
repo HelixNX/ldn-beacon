@@ -33,10 +33,11 @@ typedef struct LdnAuthRequest {
 /* p: from the OUI on. False if not an authentication request (r->version etc. still filled as far as read). */
 bool ldn_auth_parse(const LdnKeys *k, const u8 *p, size_t n, LdnAuthRequest *r);
 
-/* The host's response to r with status; own_device_id: the host's (any 8 bytes, the same for the whole run).
- * Returns the size (from the OUI on), 0 if cap is too small. */
-size_t ldn_auth_response(const LdnKeys *k, const LdnAuthRequest *r, u8 status, const u8 own_device_id[8], u8 *out,
-                         size_t cap);
+/* The host's response to r with status; own_device_id: the host's (any 8 bytes, the same for the whole run);
+ * flags: the challenge response's 4-byte flags at 0x34 (meaning unknown; run 8 tried the request's 2 and the Switch
+ * left 500 ms later). Returns the size (from the OUI on), 0 if cap is too small. */
+size_t ldn_auth_response(const LdnKeys *k, const LdnAuthRequest *r, u8 status, const u8 own_device_id[8], u32 flags,
+                         u8 *out, size_t cap);
 
 /* the host's disconnect frame (from the OUI on), 0x26 bytes */
 size_t ldn_disconnect(u8 reason, u8 *out, size_t cap);

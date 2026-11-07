@@ -155,6 +155,14 @@ SyncNetwork), show the Switch in the advertisement's participant list with its M
 Disconnect. hostapd keeps its unused message 1 going (wpa_pairwise_update_count=100000) instead of kicking the
 station. Not yet: the data path (ARP for every room member's 169.254 address, IPv4 / UDP <-> room proxy with address
 translation, broadcast frames: their group key is probably the same data key).
+Run 8 (`captures/20261106-beacon-run8/`): the Switch's one LDN request (no retry: our response arrived; our frame
+is in the capture and decrypts) was answered 1 ms later with status 0; room Connect -> the recomp took it (2 of 4
+nodes). 11 ms later the Switch sent an ADDBA response (Block Ack for our QoS data: routine), then nothing until it
+deauthenticated (reason 3) 509 ms after our response. So it accepted the frame but left: likely our challenge
+response fails its check (the 4-byte flags at 0x34 were a guess: the request's 2), or it waited for something (its
+entry in the advertisement should have been there within ~100 ms). Next run: the flags change per join attempt
+(2, 1, 0, 3; `--resp-flags` fixes one), the log says which attempt used which and how long the Switch stayed, and
+logs the advertised participant list on every change.
 If the Switch lists nothing: it may scan actively (probe requests in the log; answer them), or the card may refuse
 injection on mon0 (status line: frames sent / failed).
 

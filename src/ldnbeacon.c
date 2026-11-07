@@ -4,7 +4,8 @@
  * that concerns us (probe requests, authentication / association to our BSSID, other consoles' advertisements) is
  * logged, as a preview of stage 2.
  *   sudo ./ldnbeacon --room host[:port] [--iface wlan0] [--channel 1|6|11] [--nick name] [--password pw]
- *                    [-k keyfile]... [--pcap file] [--no-ap] [--psk-mode 0-2] [--hostapd-log file] [--log 0-2]
+ *                    [-k keyfile]... [--pcap file] [--no-ap] [--psk-mode 0-2] [--hostapd-log file] [--resp-flags n]
+ *                    [--log 0-2]
  * Stage 2 (default): hostapd runs the network on the Wi-Fi interface (ACKs, authentication, association, WPA2; see
  * ap.h) and mon0 only injects the advertisements; --no-ap is stage 1 (beacons and probe responses injected too).
  * The WPA2 key is a guess (--psk-mode, ap.h); hostapd's debug log and --pcap capture the handshake either way.
@@ -45,6 +46,12 @@ static struct {
 static u8 own_device_id[8];
 static u64 tx_pn;
 static unsigned cnt_decrypted, cnt_undecryptable, cnt_auth_answered, cnt_other_data;
+/* the challenge response's flags (ldnauth.h): fixed with --resp-flags, else a new value per join attempt from this
+ * list, to find the one a Switch accepts in one run */
+static const u32 resp_flag_tries[] = {2, 1, 0, 3};
+static int resp_flags_fixed = -1, attempt;
+static u32 attempt_flags;
+static u64 answered_ms;
 
 static void on_ldn(const RoomLdn *p, void *ud) {
     (void)ud;
@@ -116,7 +123,9 @@ static void send_room_node(u8 type) {
 
 static void station_leave(const char *why) {
     if (!sta.active) return;
-    logf_(0, "station " MAC_FMT " (\"%s\") left: %s", MAC_ARG(sta.mac), sta.name, why);
+    logf_(0, "station " MAC_FMT " (\"%s\") left: %s, %llu ms after our authentication response (attempt %d, "
+             "response flags %u)", MAC_ARG(sta.mac), sta.name, why, (unsigned long long)(now_ms() - answered_ms),
+          attempt, attempt_flags);
     if (sta.in_room && net.have) send_room_node(LDN_DISCONNECT);
     sta.active = sta.in_room = false;
 }
@@ -149,14 +158,24 @@ static void handle_ldn(const u8 *p, size_t n, const u8 src[6]) {
     u8 status = LDN_AUTH_OK;
     if (r.has_challenge && !r.challenge_ok) status = LDN_AUTH_BAD_CHALLENGE;
     bool ours = !memcmp(r.server_random, net.session.server_random, 16);
+    static u64 last_req_ms;
+    bool new_attempt = !last_req_ms || now_ms() - last_req_ms > 2000;   /* retries come within ~1 s */
+    last_req_ms = now_ms();
+    if (new_attempt) {                                  /* (the client random changes on every retry too) */
+        attempt_flags = resp_flags_fixed >= 0 ? (u32)resp_flags_fixed
+                                              : resp_flag_tries[attempt % (int)(sizeof resp_flag_tries / sizeof *resp_flag_tries)];
+        attempt++;
+    }
     static u8 resp[1024];
-    size_t rn = ldn_auth_response(&keys, &r, status, own_device_id, resp, sizeof resp);
+    size_t rn = ldn_auth_response(&keys, &r, status, own_device_id, attempt_flags, resp, sizeof resp);
+    answered_ms = now_ms();
     bool sent = rn && send_ldn_frame(src, resp, rn);
     cnt_auth_answered += sent;
     logf_(0, "air: LDN authentication request from " MAC_FMT " (\"%s\", version %u, app version %u, platform %u, "
-             "challenge %s%s): %s, status %u", MAC_ARG(src), r.user_name, r.version, r.app_version, r.platform,
-          !r.has_challenge ? "none" : r.challenge_ok ? "ok" : "BAD", ours ? "" : ", other server random",
-          sent ? "answered" : "answer FAILED", status);
+             "challenge %s%s, P %u Q %u flags %u): %s, status %u, attempt %d with response flags %u",
+          MAC_ARG(src), r.user_name, r.version, r.app_version, r.platform,
+          !r.has_challenge ? "none" : r.challenge_ok ? "ok" : "BAD", ours ? "" : ", other server random", r.p, r.q,
+          r.flags, sent ? "answered" : "answer FAILED", status, attempt, attempt_flags);
     if (status != LDN_AUTH_OK) return;
     if (!sta.active || memcmp(sta.mac, src, 6)) {
         station_leave("another station joined");
@@ -312,6 +331,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--psk-mode") && v) psk_mode = atoi(v), i++;
         else if (!strcmp(a, "--hostapd-log") && v) hostapd_log = v, i++;
         else if (!strcmp(a, "--passphrase") && v) passphrase = v, i++;
+        else if (!strcmp(a, "--resp-flags") && v) resp_flags_fixed = atoi(v), i++;
         else {
             fprintf(stderr, "usage: sudo ./ldnbeacon --room host[:port] [--iface wlan0] [--channel 1|6|11] "
                             "[--nick name] [--password pw] [-k keyfile]... [--pcap file] [--no-ap] [--psk-mode 0-2] [--hostapd-log file] [--log 0-2]\n");
@@ -437,6 +457,29 @@ int main(int argc, char **argv) {
                             memcpy(a.participants[i].mac, sta.mac, 6);
                             a.participants[i].platform = sta.platform;
                         }
+                /* the participant list as advertised, logged when it changes */
+                static u8 last_list[ADV_PARTICIPANTS * 12 + 1];
+                u8 list[ADV_PARTICIPANTS * 12 + 1];
+                list[0] = a.participant_count;
+                for (int i = 0; i < ADV_PARTICIPANTS; i++) {
+                    const LdnAdvParticipant *q = &a.participants[i];
+                    u8 *e = list + 1 + i * 12;
+                    e[0] = (u8)(q->ipv4 >> 24); e[1] = (u8)(q->ipv4 >> 16); e[2] = (u8)(q->ipv4 >> 8); e[3] = (u8)q->ipv4;
+                    memcpy(e + 4, q->mac, 6);
+                    e[10] = q->connected;
+                    e[11] = q->platform;
+                }
+                if (memcmp(list, last_list, sizeof list)) {
+                    memcpy(last_list, list, sizeof list);
+                    logf_(0, "advertising %u participant(s):", a.participant_count);
+                    for (int i = 0; i < ADV_PARTICIPANTS; i++) {
+                        const LdnAdvParticipant *q = &a.participants[i];
+                        if (!q->connected) continue;
+                        logf_(0, "  %d: %u.%u.%u.%u " MAC_FMT " \"%s\" platform %u app version %u", i, q->ipv4 >> 24,
+                              (q->ipv4 >> 16) & 255, (q->ipv4 >> 8) & 255, q->ipv4 & 255, MAC_ARG(q->mac), q->user_name,
+                              q->platform, q->app_version);
+                    }
+                }
                 size_t k;
                 if (!use_ap) {
                     k = frame_beacon(fr, sizeof fr, radio.mac, seq++ & 0xFFF, now_us() - start_us, (u8)channel);

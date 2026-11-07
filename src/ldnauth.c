@@ -44,8 +44,8 @@ bool ldn_auth_parse(const LdnKeys *k, const u8 *p, size_t n, LdnAuthRequest *r) 
     return !d.err;
 }
 
-size_t ldn_auth_response(const LdnKeys *k, const LdnAuthRequest *r, u8 status, const u8 own_device_id[8], u8 *out,
-                         size_t cap) {
+size_t ldn_auth_response(const LdnKeys *k, const LdnAuthRequest *r, u8 status, const u8 own_device_id[8], u32 flags,
+                         u8 *out, size_t cap) {
     size_t size = r->has_challenge ? RESP_CHALLENGE + 0x100 : 1;
     if (cap < PAYLOAD + size) return 0;
     memset(out, 0, PAYLOAD + size);
@@ -67,7 +67,10 @@ size_t ldn_auth_response(const LdnKeys *k, const LdnAuthRequest *r, u8 status, c
     pl[0] = 0;                                              /* platform: Switch (the host as a recomp presents it) */
     if (r->has_challenge) {
         u8 *c = pl + RESP_CHALLENGE;
-        c[0x37] = r->flags;                                 /* 4 bytes, big-endian: as the request's (unverified) */
+        c[0x34] = (u8)(flags >> 24);                        /* 4 bytes, big-endian */
+        c[0x35] = (u8)(flags >> 16);
+        c[0x36] = (u8)(flags >> 8);
+        c[0x37] = (u8)flags;
         memcpy(c + 0x38, r->nonce, 8);
         memcpy(c + 0x40, r->device_id, 8);
         memcpy(c + 0x48, own_device_id, 8);

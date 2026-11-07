@@ -36,7 +36,7 @@ int main(int argc, char **argv) {
                !r.has_challenge ? "none" : r.challenge_ok ? "HMAC ok" : "HMAC BAD", r.p, r.q, r.flags);
         if (!ok || !r.challenge_ok) { bad++; continue; }
         u8 resp[1024];
-        size_t rn = ldn_auth_response(&keys, &r, LDN_AUTH_OK, own_id, resp, sizeof resp);
+        size_t rn = ldn_auth_response(&keys, &r, LDN_AUTH_OK, own_id, r.flags, resp, sizeof resp);
         /* the frame the beacon sends: QoS data, FromDS, LLC/SNAP + EtherType 0x88B7 */
         u8 body[1100], hdr[26] = {0x88, 0x02, 0, 0, 0x02, 0x11, 0x22, 0x33, 0x44, 0x55, 0x02, 0x00, 0x00, 0x00, 0x00,
                                   0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x01, 0x10, 0x00, 0x00, 0x00};
