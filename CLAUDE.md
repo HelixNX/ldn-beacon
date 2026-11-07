@@ -194,6 +194,20 @@ stay 4.0-4.6 s ending in deauthentication reason 3; in between it sent its gratu
 noise, no IPv4 UDP, and we sent it nothing but the authentication responses (ccmptest with the logged data key: 41
 frames decrypt, 6 + 6 LDN, 6 ARP, 23 IPv6). Fixed: RUN.txt builds clean (`unzip -DD`, `rm -rf build`), and ldnbeacon
 logs "stage 3 ..., compiled <date time>" at start, so a stale binary shows in the log.
+Run 12 (`captures/20261106-beacon-run12/`, stage 3 for real: the "compiled" line is there): three joins, the Switch
+left 4.4-4.6 s after each (reason 3), as before. **The room host reacts to the join**: while the Switch is in its
+network it broadcasts 108-byte UDP from port 12345 to 192.168.1.255:12345 about twice a second (27 forwarded as group
+frames, key index 1; one more dropped right after a leave; never sent before a join), and sends no unicast. **The
+Switch never answers**: no IPv4 UDP at all, only its gratuitous ARP and IPv6 noise (ccmptest: 19 frames decrypt).
+So it probably does not take our group frames. Our injected group frames are not in the pcap (mt7925e reports only
+injected frames that wait for an ACK), so the capture cannot show what went out. Seen: the Switch's group frames have
+no DS bits (addr3 our BSSID), key index 1, and its CCMP packet numbers start at a random 48-bit value on each join
+(0x2e06668ad953, 0x46f22cc59461, 0xc5d5202fc289, 0xeb78780e228a) where ours started below 0x10000.
+Next run (ldnbeacon): our PN starts at 0xF000xxxxxxxx (above the Switch's, in case one replay counter per key);
+`--bcast-mode` (default 2: odd join attempts send the room's broadcasts as group frames, even attempts as unicast
+frames to the Switch's MAC with the IP broadcast inside; 0 group only, 1 unicast only); after each join an ARP request
+from the host (.1, BSSID) for the Switch's address as a group frame (+500 ms) and as unicast (+1500 ms), and the
+Switch's ARP replies are logged: which path reaches it. Unicast frames from the host are logged (first 20).
 If the Switch lists nothing: it may scan actively (probe requests in the log; answer them), or the card may refuse
 injection on mon0 (status line: frames sent / failed).
 

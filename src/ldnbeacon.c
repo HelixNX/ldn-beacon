@@ -5,7 +5,7 @@
  * logged, as a preview of stage 2.
  *   sudo ./ldnbeacon --room host[:port] [--iface wlan0] [--channel 1|6|11] [--nick name] [--password pw]
  *                    [-k keyfile]... [--pcap file] [--no-ap] [--psk-mode 0-2] [--hostapd-log file] [--resp-flags n]
- *                    [--log 0-2]
+ *                    [--bcast-mode 0-2] [--log 0-2]
  * Stage 2 (default): hostapd runs the network on the Wi-Fi interface (ACKs, authentication, association, WPA2; see
  * ap.h) and mon0 only injects the advertisements; --no-ap is stage 1 (beacons and probe responses injected too).
  * The WPA2 key is a guess (--psk-mode, ap.h); hostapd's debug log and --pcap capture the handshake either way.
@@ -53,6 +53,13 @@ static const u32 resp_flag_tries[] = {2, 1, 0, 3};
 static int resp_flags_fixed = 2, attempt;          /* run 9: 2, 1 and 0 all ended the same way */
 static u32 attempt_flags;
 static u64 answered_ms;
+/* run 12: the host's broadcasts went out as group frames (key index 1) and the Switch never answered. How room
+ * broadcasts reach the Switch: 0 group frames, 1 unicast to its MAC (IP broadcast inside; one station, so the same
+ * thing with ACKs and retries), 2 alternate per join attempt (odd: group, even: unicast) */
+static int bcast_mode = 2;
+static bool bcast_unicast;
+/* ARP probes from the host (.1) for the Switch's address after each join: group at +500 ms, unicast at +1500 ms */
+static int probes_sent;
 
 static void on_ldn(const RoomLdn *p, void *ud) {
     (void)ud;
@@ -166,6 +173,8 @@ static void handle_ldn(const u8 *p, size_t n, const u8 src[6]) {
         attempt_flags = resp_flags_fixed >= 0 ? (u32)resp_flags_fixed
                                               : resp_flag_tries[attempt % (int)(sizeof resp_flag_tries / sizeof *resp_flag_tries)];
         attempt++;
+        bcast_unicast = bcast_mode == 1 || (bcast_mode == 2 && attempt % 2 == 0);
+        probes_sent = 0;
     }
     static u8 resp[1024];
     size_t rn = ldn_auth_response(&keys, &r, status, own_device_id, attempt_flags, resp, sizeof resp);
@@ -177,6 +186,9 @@ static void handle_ldn(const u8 *p, size_t n, const u8 src[6]) {
           MAC_ARG(src), r.user_name, r.version, r.app_version, r.platform,
           !r.has_challenge ? "none" : r.challenge_ok ? "ok" : "BAD", ours ? "" : ", other server random", r.p, r.q,
           r.flags, sent ? "answered" : "answer FAILED", status, attempt, attempt_flags);
+    if (new_attempt)
+        logf_(0, "bridge: attempt %d sends the room's broadcasts %s", attempt,
+              bcast_unicast ? "as unicast frames to the Switch" : "as group frames (key index 1)");
     if (status != LDN_AUTH_OK) return;
     if (!sta.active || memcmp(sta.mac, src, 6)) {
         station_leave("another station joined");
@@ -285,17 +297,20 @@ static void on_proxy(const RoomProxy *p, void *ud) {
     }
     static const u8 bcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
     u32 dst = p->broadcast ? (ldn_base() | 0xFF) : ldn_ip(me);
+    const u8 *dest = p->broadcast && !bcast_unicast ? bcast : sta.mac;
     static u8 pkt[2048];
     size_t n = ipv4_udp_build(pkt, sizeof pkt, ldn_ip(src), dst, p->local_port, p->remote_port, p->data, p->size,
                               ip_id++);
     u8 smac[6];
     node_mac(src, smac);
-    bool ok = n && send_data_frame(p->broadcast ? bcast : sta.mac, smac, ETHERTYPE_IPV4, pkt, n);
+    bool ok = n && send_data_frame(dest, smac, ETHERTYPE_IPV4, pkt, n);
     cnt_to_air += ok;
-    if (cnt_to_air <= 5 || !ok)
-        logf_(0, "bridge: room " IP_FMT ":%u -> air 169.254.%u.%u:%u%s, %u bytes%s", IP_ARG(p->local_ip), p->local_port,
-              net.session.subnet, dst & 0xFF, p->remote_port, p->broadcast ? " (broadcast)" : "", p->size,
-              ok ? "" : ": send FAILED");
+    static unsigned logged_bcast, logged_unicast;
+    bool log = p->broadcast ? logged_bcast++ < 5 : logged_unicast++ < 20;   /* unicast from the host: the news */
+    if (log || !ok)
+        logf_(0, "bridge: room " IP_FMT ":%u -> air 169.254.%u.%u:%u%s, %u bytes, %s%s", IP_ARG(p->local_ip),
+              p->local_port, net.session.subnet, dst & 0xFF, p->remote_port, p->broadcast ? " (broadcast)" : "", p->size,
+              dest == bcast ? "group frame" : "unicast frame", ok ? "" : ": send FAILED");
 }
 
 /* air -> room: an IPv4 or ARP frame from the Switch */
@@ -304,7 +319,15 @@ static void from_switch(u16 et, const u8 *p, size_t n, const u8 src_mac[6]) {
     if (me < 0 || memcmp(src_mac, sta.mac, 6)) { cnt_drop_air++; return; }
     if (et == ETHERTYPE_ARP) {
         Arp q;
-        if (!arp_parse(p, n, &q) || q.op != 1) return;
+        if (!arp_parse(p, n, &q)) return;
+        if (q.op == 2) {                                /* an answer to our probe: that path reaches the Switch */
+            logf_(0, "bridge: ARP reply from the Switch (169.254.%u.%u is " MAC_FMT "), %llu ms after our authentication "
+                     "response (probes sent: group %s, unicast %s)", (q.spa >> 8) & 255, q.spa & 255, MAC_ARG(q.sha),
+                  (unsigned long long)(now_ms() - answered_ms), probes_sent > 0 ? "yes" : "not yet",
+                  probes_sent > 1 ? "yes" : "not yet");
+            return;
+        }
+        if (q.op != 1) return;
         int t = node_of_ldn_ip(q.tpa);
         if (t < 0 || t == me) return;                   /* its own address (announcement) or nobody */
         Arp r = {.op = 2, .spa = q.tpa, .tpa = q.spa};
@@ -344,6 +367,20 @@ static void from_switch(u16 et, const u8 *p, size_t n, const u8 src_mac[6]) {
     if (cnt_to_room <= 5)
         logf_(0, "bridge: air 169.254.%u.%u:%u -> room " IP_FMT ":%u%s, %zu bytes", (s >> 8) & 255, s & 255, sp,
               IP_ARG(r.remote_ip), dp, bcast ? " (broadcast)" : "", len);
+}
+
+/* who has the Switch's address, from the host (.1, our BSSID): group (key index 1) or unicast */
+static void send_arp_probe(bool group) {
+    int me = sta_node();
+    if (me < 0) return;
+    static const u8 bcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    Arp q = {.op = 1, .spa = ldn_ip(0), .tpa = ldn_ip(me)};
+    memcpy(q.sha, radio.mac, 6);
+    u8 b[64];
+    size_t k = arp_build(b, sizeof b, &q);
+    bool ok = k && send_data_frame(group ? bcast : sta.mac, radio.mac, ETHERTYPE_ARP, b, k);
+    logf_(0, "bridge: ARP probe for 169.254.%u.%u sent as a %s frame%s", net.session.subnet, ldn_ip(me) & 0xFF,
+          group ? "group" : "unicast", ok ? "" : ": send FAILED");
 }
 
 static bool first_time(Mac *list, int *n, const u8 *mac) {
@@ -466,20 +503,26 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--hostapd-log") && v) hostapd_log = v, i++;
         else if (!strcmp(a, "--passphrase") && v) passphrase = v, i++;
         else if (!strcmp(a, "--resp-flags") && v) resp_flags_fixed = atoi(v), i++;
+        else if (!strcmp(a, "--bcast-mode") && v) bcast_mode = atoi(v), i++;
         else {
             fprintf(stderr, "usage: sudo ./ldnbeacon --room host[:port] [--iface wlan0] [--channel 1|6|11] "
-                            "[--nick name] [--password pw] [-k keyfile]... [--pcap file] [--no-ap] [--psk-mode 0-2] [--hostapd-log file] [--log 0-2]\n");
+                            "[--nick name] [--password pw] [-k keyfile]... [--pcap file] [--no-ap] [--psk-mode 0-2] [--hostapd-log file]\n"
+                            "       [--resp-flags n] [--bcast-mode 0-2] [--log 0-2]\n");
             return 2;
         }
     }
     if (!*host) { fprintf(stderr, "ldnbeacon: --room host[:port] is required\n"); return 2; }
     /* which code is running: run 11 ran run 10's object file (zip timestamps are local time, the laptop's clock UTC,
      * so the newer source looked older than the old build and make skipped it) */
-    logf_(0, "ldnbeacon: stage 3 (room <-> air bridge), compiled " __DATE__ " " __TIME__);
+    logf_(0, "ldnbeacon: stage 3 (room <-> air bridge, broadcast mode %d, ARP probes, high PN), compiled " __DATE__
+             " " __TIME__, bcast_mode);
     if (channel != 1 && channel != 6 && channel != 11) { fprintf(stderr, "ldnbeacon: channel 1, 6 or 11\n"); return 2; }
     if (!nkeys) { keyfiles[0] = "../keys/prod.keys"; keyfiles[1] = "../keys/ldn.txt"; nkeys = 2; }
     random_bytes(own_device_id, sizeof own_device_id);
-    random_bytes(&tx_pn, 2);                                /* any start; counts up */
+    /* our CCMP packet numbers start above any the Switch uses (it starts each join at a random 48-bit value, e.g.
+     * 0x2e06668ad953, 0xeb78780e228a): a receiver with one replay counter per key would drop lower ones */
+    random_bytes(&tx_pn, 4);
+    tx_pn = 0xF00000000000ull | (tx_pn & 0xFFFFFFFFull);
     if (psk_mode < 0 || psk_mode >= AP_PSK_MODES) { fprintf(stderr, "ldnbeacon: --psk-mode 0-%d\n", AP_PSK_MODES - 1); return 2; }
     if (!ldn_keys_load(&keys, keyfiles, nkeys, use_ap ? passphrase : NULL)) return 1;
     c.host = host;
@@ -553,6 +596,10 @@ int main(int argc, char **argv) {
             RoomLdn p = {.type = LDN_SCAN, .broadcast = true};
             memcpy(p.local_ip, room_ip(), 4);
             room_send_ldn(&p);
+        }
+        if (sta.active && sta.in_room && probes_sent < 2 && t - answered_ms >= (probes_sent ? 1500u : 500u)) {
+            send_arp_probe(probes_sent == 0);
+            probes_sent++;
         }
         if (net.have && t - net.seen_ms > 5000) {
             logf_(0, "network of " IP_FMT " gone (no answer for 5 s): off the air", IP_ARG(net.host_ip));
