@@ -9,7 +9,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define S3_PROTO_VERSION 4
+#define S3_PROTO_VERSION 5
 #define S3_MAX_PAYLOAD 2400                 /* an 802.11 frame plus our small headers */
 #define S3_MAX_WIRE (S3_MAX_PAYLOAD + 3 + (S3_MAX_PAYLOAD + 3) / 254 + 2)
 
@@ -69,6 +69,10 @@ typedef struct S3Ap {
      * starts none, installs ldn_key as the station's pairwise key and as the group key, and authorizes the station */
     uint8_t ldn;
     uint8_t ldn_key[16];
+    /* the AP's address (the network's BSSID) for this network; all zero: keep the current one. The beacon gives the
+     * room host's MAC, so the host's Pia constant id (made from its MAC) is the same in the room and on the air: the
+     * game embeds it in its own data (S3 run 11: a raid lobby's reliable messages, little-endian, game-compressed) */
+    uint8_t ap_mac[6];
 } S3Ap;
 
 typedef struct S3ApDone {

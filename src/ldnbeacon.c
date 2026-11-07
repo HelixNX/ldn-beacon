@@ -65,8 +65,10 @@ static u32 attempt_flags;
 static u64 answered_ms;
 /* How room broadcasts reach the Switch: 0 group frames, 1 unicast to its MAC (IP broadcast inside; one station, so
  * the same thing with ACKs and retries), 2 alternate per join attempt (odd: group, even: unicast). Run 13: the
- * Switch answered none of our group ARP probes and every unicast one, so unicast is the default */
-static int bcast_mode = 1;
+ * Switch answered none of our group ARP probes and every unicast one (on the MT7925). With the S3 group frames have
+ * reached it (S3 run 3), and a real Switch host sends its broadcasts as group frames (join run 7), so the default
+ * alternates: the first join as a real host does, the next as unicast */
+static int bcast_mode = 2;
 static bool bcast_unicast;
 /* ARP probes from the host (.1) for the Switch's address after each join: group at +500 ms, unicast at +1500 ms */
 static int probes_sent;
@@ -97,9 +99,10 @@ static void on_ldn(const RoomLdn *p, void *ud) {
               zero16, 16) ? sr : "zero (a recomp host leaves it so)");
         sta.active = sta.in_room = false;               /* a new network: the Switch must join again */
         logf_(0, "network of " IP_FMT ": local communication id %016llx, scene %u, %u of %u nodes, %u bytes of "
-                 "advertise data; on the air as 169.254.%u.0/24",
+                 "advertise data, security level %u, accept policy %u (a Switch host: 1, 0); on the air as "
+                 "169.254.%u.0/24",
               IP_ARG(p->local_ip), (unsigned long long)n.id.intent.local_communication_id, n.id.intent.scene_id,
-              n.node_count, n.node_count_max, n.advertise_size, net.session.subnet);
+              n.node_count, n.node_count_max, n.advertise_size, n.security_mode, n.accept_policy, net.session.subnet);
     } else if (changed)
         logf_(1, "network of " IP_FMT " changed: %u of %u nodes", IP_ARG(p->local_ip), n.node_count, n.node_count_max);
 }
@@ -136,8 +139,9 @@ static void send_room_node(u8 type) {
     memset(&node, 0, sizeof node);
     const u8 *ip = room_ip();
     node.ipv4 = room_ip_u32();
-    node.mac[0] = 0x02;
-    memcpy(node.mac + 2, ip, 4);
+    /* the Switch's own MAC (the recomp takes the NodeInfo as it is): its Pia constant id is then the same in the
+     * room as on the air, where game data carries it beyond the reach of the rewrite (S3 run 11) */
+    memcpy(node.mac, sta.mac, 6);
     node.is_connected = 1;
     memcpy(node.user_name, sta.name, 32);
     node.local_communication_version = (s16)sta.version;
@@ -290,6 +294,13 @@ static const u8 *pia_readdress(const u8 *p, size_t n, u32 from_ip, u32 to_ip, bo
                   from_ip >> 24, from_ip >> 16 & 255, from_ip >> 8 & 255, from_ip & 255, n);
         return p;
     }
+    static unsigned summarized[2];
+    if (summarized[to_air]++ < 1500) {             /* S3 run 9: who acknowledges what in a raid */
+        static char line[2048];
+        pia_summary(b, n, line, sizeof line);
+        logf_(0, "pia %s %u.%u.%u.%u %zu: %s", to_air ? "R>A" : "A>R", from_ip >> 24, from_ip >> 16 & 255,
+              from_ip >> 8 & 255, from_ip & 255, n, line);
+    }
     if (cnt_pia_ok++ < 5)
         logf_(0, "pia: %s packet %u.%u.%u.%u -> as from %u.%u.%u.%u, %zu bytes, protocol type %02x", dir, from_ip >> 24,
               from_ip >> 16 & 255, from_ip >> 8 & 255, from_ip & 255, to_ip >> 24, to_ip >> 16 & 255, to_ip >> 8 & 255,
@@ -303,6 +314,12 @@ static const u8 *pia_readdress(const u8 *p, size_t n, u32 from_ip, u32 to_ip, bo
             logf_(0, "pia: %s packet's messages %s: only re-addressed", dir, wn ? "grew past 1472 bytes" : "do not parse");
         pia_encrypt(&net.pia, &pia_variant, to_ip, b, n);
         return b;
+    }
+    static unsigned summarized_after[2];
+    if (rep && summarized_after[to_air]++ < 300) {  /* what the receiver gets when something was replaced */
+        static char line[2048];
+        pia_summary(w, wn, line, sizeof line);
+        logf_(0, "pia %s after (%u replaced): %s", to_air ? "R>A" : "A>R", rep, line);
     }
     if (rep && cnt_pia_rewritten++ < 10)
         logf_(0, "pia: %s packet: %u addresses / constant ids inside replaced (%zu -> %zu bytes)", dir, rep, n, wn);
@@ -763,6 +780,10 @@ int main(int argc, char **argv) {
                 ApConfig ac = {.channel = (u8)channel, .psk_mode = psk_mode, .open = s3_open, .log_path = hostapd_log};
                 host_ssid(&net.session, ac.ssid);
                 ldn_data_key(&keys, net.session.server_random, ac.data_key);
+                /* the host's room MAC as our BSSID (S3): its Pia constant id is then the same on both sides; the
+                 * raid's game data carries it inside the game's own compressed data, which the rewrite cannot reach
+                 * (S3 run 11) */
+                memcpy(ac.bssid, net.info.nodes[0].mac, 6);
                 if (!radio_ap_start(&radio, &ac, err, sizeof err))
                     logf_(0, "ldnbeacon: %s", err);
             }
@@ -780,7 +801,9 @@ int main(int argc, char **argv) {
                             a.participants[i].platform = sta.platform;
                         }
                 /* a new nonce whenever the content changes: a station may skip advertisements whose nonce it has
-                 * already seen (run 9: the Switch left 510 ms after joining, as if it never saw itself listed) */
+                 * already seen (run 9: the Switch left 510 ms after joining, as if it never saw itself listed). One
+                 * more, as a real Switch host does (join run 7: 6e88ab97 -> 6e88ab98 when a station joined); a
+                 * random one could go backwards */
                 {
                     static LdnAdvert last_adv;
                     static bool have_last;
@@ -788,7 +811,7 @@ int main(int argc, char **argv) {
                     cmp.nonce = 0;
                     if (!have_last || memcmp(&cmp, &last_adv, sizeof cmp)) {
                         if (have_last) {
-                            random_bytes(&net.session.nonce, 4);
+                            net.session.nonce++;
                             logf_(1, "advertisement changed: new nonce %08x", net.session.nonce);
                         }
                         last_adv = cmp;

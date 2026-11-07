@@ -167,11 +167,13 @@ static unsigned rewrite_bytes(u8 *p, size_t n, const PiaMap *m) {
 
 typedef struct { u8 flags, mflags, proto; u32 port; u64 dest; u16 size; const u8 *payload; } Msg;
 
-/* one message at *pos (fields not present: the previous message's); false at the end (padding) or on garbage */
+/* one message at *pos (fields not present: the previous message's); false at the end (padding) or on garbage.
+ * Messages follow each other with no padding (S3 run 8, a Switch's raid packets: a 31-byte message, then the next
+ * one's field flags at once; the wiki's "padded to 4" does not hold for version 11); only the end is padded with 0xFF
+ * to 16 */
 static bool next_msg(const u8 *b, size_t len, size_t *pos, Msg *m) {
     size_t i = *pos;
     if (i >= len || b[i] == 0xFF) return false;
-    size_t start = i;
     m->flags = b[i++];
     if (m->flags & 1) { if (i + 1 > len) return false; m->mflags = b[i++]; }
     if (m->flags & 2) { if (i + 2 > len) return false; m->size = (u16)be_n(b + i, 2); i += 2; }
@@ -180,9 +182,49 @@ static bool next_msg(const u8 *b, size_t len, size_t *pos, Msg *m) {
     if (i + m->size > len) return false;
     m->payload = b + i;
     i += m->size;
-    i = start + ((i - start + 3) & ~(size_t)3);
-    *pos = i < len ? i : len;
+    *pos = i;
     return true;
+}
+
+/* Net (protocol 0x2C) UpdateNetworkConnectionStatus (type 0x11; kinnay's Net-Protocol): u8 version, u8 type, u16 size,
+ * u32 sequence, u16 host variable id, u64 host constant id, u64 network id, u8 open, u16 station count, u8 migrating,
+ * then per station (21 bytes in 6.16-6.23, as both the recomp's and a Switch's are): u8 migration state, u8 ranking
+ * (0xFF: empty slot), u8 disconnection candidate, 16-byte address, u16 port. Both messages seen rank the stations by
+ * their MAC-made constant ids, ascending (the recomp: station c00101.. 0, host c00102.. 1; a Switch host: itself
+ * ce05.. 0, the station d990.. 1). Rewriting the ids can change that order, so the ranks are made again from the new
+ * ids; only when the message follows the rule with the old ids, else it is left alone. Before rewrite_bytes (the
+ * addresses still the sender's side's). Returns the number of ranks changed. */
+static unsigned rerank_net_status(u8 *p, size_t n, const PiaMap *m) {
+    enum { BASE = 0x1E, ENTRY = 21 };
+    if (n < BASE || p[1] != 0x11) return 0;
+    size_t cnt = (size_t)p[0x1B] << 8 | p[0x1C];
+    if (cnt > 16 || BASE + cnt * ENTRY > n) return 0;
+    u64 old_id[16], new_id[16];
+    size_t idx[16], k = 0;
+    for (size_t i = 0; i < cnt; i++) {
+        const u8 *e = p + BASE + i * ENTRY;
+        if (e[1] == 0xFF) continue;
+        u32 ip = (u32)be_n(e + 3, 4);
+        int j = 0;
+        while (j < m->n && m->from_ip[j] != ip) j++;
+        if (j == m->n) return 0;                        /* a station we cannot place: leave it */
+        old_id[k] = m->from_cid[j];
+        new_id[k] = m->to_cid[j];
+        idx[k++] = i;
+    }
+    for (size_t a = 0; a < k; a++) {                    /* the rule holds with the old ids? */
+        unsigned r = 0;
+        for (size_t b = 0; b < k; b++) r += old_id[b] < old_id[a];
+        if (p[BASE + idx[a] * ENTRY + 1] != r) return 0;
+    }
+    unsigned changed = 0;
+    for (size_t a = 0; a < k; a++) {
+        unsigned r = 0;
+        for (size_t b = 0; b < k; b++) r += new_id[b] < new_id[a];
+        u8 *rank = p + BASE + idx[a] * ENTRY + 1;
+        if (*rank != r) { *rank = (u8)r; changed++; }
+    }
+    return changed;
 }
 
 size_t pia_rewrite(const u8 *in, size_t n, u8 *out, size_t cap, const PiaMap *m, unsigned *replaced) {
@@ -193,6 +235,7 @@ size_t pia_rewrite(const u8 *in, size_t n, u8 *out, size_t cap, const PiaMap *m,
     size_t o = PIA_HDR, pos = 0;
     Msg msg = {0};
     unsigned rep = 0;
+    size_t out_size = 0;                                /* the size a receiver carries over (none at first: 0) */
     static u8 raw[8192], comp[8192];
     while (next_msg(b, body, &pos, &msg)) {
         const u8 *pl = msg.payload;
@@ -200,18 +243,23 @@ size_t pia_rewrite(const u8 *in, size_t n, u8 *out, size_t cap, const PiaMap *m,
         if (msg.mflags & 0x20) {                        /* zlib-compressed payload */
             uLongf rn = sizeof raw;
             if (uncompress(raw, &rn, msg.payload, msg.size) != Z_OK) return 0;
-            unsigned r = rewrite_bytes(raw, rn, m);
+            unsigned r = msg.proto == 0x2C ? rerank_net_status(raw, rn, m) : 0;
+            r += rewrite_bytes(raw, rn, m);
             rep += r;
             if (r) {
                 /* same window as the original stream's header (Pia: 48 xx, a 4 KB window): an inflater set up for
-                   that window rejects zlib's default 32 KB header (78 9c) */
+                   that window rejects zlib's default 32 KB header (78 9c). Level 5 with that window and the ending
+                   below reproduces a real Switch host's stream byte for byte (join run 7) */
                 int wbits = (msg.payload[0] >> 4) + 8;
                 if (wbits < 9 || wbits > 15) wbits = 12;
                 z_stream zs = {0};
-                if (deflateInit2(&zs, 2, Z_DEFLATED, wbits, 8, Z_DEFAULT_STRATEGY) != Z_OK) return 0;
+                if (deflateInit2(&zs, 5, Z_DEFLATED, wbits, 8, Z_DEFAULT_STRATEGY) != Z_OK) return 0;
                 zs.next_in = raw; zs.avail_in = (uInt)rn;
                 zs.next_out = comp; zs.avail_out = sizeof comp;
-                int zr = deflate(&zs, Z_FINISH);
+                /* as Pia ends its streams (the recomp's and a real Switch's: 00 00 ff ff 03 00, then the Adler-32):
+                   a sync flush, then an empty final block */
+                int zr = deflate(&zs, Z_SYNC_FLUSH);
+                if (zr == Z_OK) zr = deflate(&zs, Z_FINISH);
                 pn = zs.total_out;
                 deflateEnd(&zs);
                 if (zr != Z_STREAM_END) return 0;
@@ -219,18 +267,24 @@ size_t pia_rewrite(const u8 *in, size_t n, u8 *out, size_t cap, const PiaMap *m,
             }
         } else if (pn <= sizeof raw) {
             memcpy(raw, pl, pn);
+            if (msg.proto == 0x2C) rep += rerank_net_status(raw, pn, m);
             rep += rewrite_bytes(raw, pn, m);
             pl = raw;
         }
-        size_t start = o;
-        if (o + 16 + pn + 3 > cap) return 0;
-        out[o++] = (u8)(msg.flags | 0x0F);              /* every field written out */
-        out[o++] = msg.mflags;
-        put_be(out + o, pn, 2); o += 2;
-        out[o] = msg.proto; put_be(out + o + 1, msg.port, 3); o += 4;
-        put_be(out + o, msg.dest, 8); o += 8;
+        /* the message as it came: the same fields present (absent ones are the previous message's, unchanged here),
+           the size added when it changed from the one a receiver would carry over. No padding between messages
+           (next_msg): padding a message to 4 with 00 (up to S3 run 6) made the Switch read a field-less message and
+           drop the packet; with FF (S3 runs 7-8) it ends the packet there, losing every later message */
+        if (o + 16 + pn > cap) return 0;
+        u8 fl = msg.flags;
+        if (pn != out_size) fl |= 2;
+        out[o++] = fl;
+        if (fl & 1) out[o++] = msg.mflags;
+        if (fl & 2) { put_be(out + o, pn, 2); o += 2; }
+        if (fl & 4) { out[o] = msg.proto; put_be(out + o + 1, msg.port, 3); o += 4; }
+        if (fl & 8) { put_be(out + o, msg.dest, 8); o += 8; }
         memcpy(out + o, pl, pn); o += pn;
-        while ((o - start) & 3) out[o++] = 0;
+        out_size = pn;
     }
     if (pos < body && b[pos] != 0xFF) return 0;        /* stopped on something that is not padding */
     while ((o - PIA_HDR) & 15) { if (o >= cap) return 0; out[o++] = 0xFF; }
@@ -258,5 +312,33 @@ void pia_dump(const u8 *p, size_t n) {
         printf(":");
         for (size_t k = 0; k < pn; k++) printf("%s%02x", k % 32 ? "" : "\n      ", pl[k]);
         printf("\n");
+    }
+}
+
+void pia_summary(const u8 *p, size_t n, char *out, size_t cap) {
+    size_t o = 0;
+    out[0] = 0;
+    if (!pia_is_packet(p, n) || cap < 64) return;
+    o += (size_t)snprintf(out + o, cap - o, "dst %04x src %04x id %04x foot %u:", (unsigned)be_n(p + 5, 2),
+                          (unsigned)be_n(p + 7, 2), (unsigned)be_n(p + 9, 2), p[0xB]);
+    size_t body = n - PIA_HDR - p[0xB], pos = 0;
+    Msg msg = {0};
+    static u8 raw[8192];
+    while (o + 48 < cap && next_msg(p + PIA_HDR, body, &pos, &msg)) {
+        const u8 *pl = msg.payload;
+        size_t pn = msg.size;
+        uLongf rn = sizeof raw;
+        bool z = (msg.mflags & 0x20) && uncompress(raw, &rn, msg.payload, msg.size) == Z_OK;
+        if (z) { pl = raw; pn = rn; }
+        o += (size_t)snprintf(out + o, cap - o, " %02x/%u%s[%02x %u]", msg.proto, (unsigned)msg.port, z ? "z" : "",
+                              msg.mflags, (unsigned)pn);
+        /* the session protocol (who is in the session) and reliable messages up to 300 bytes in full, the rest's start */
+        size_t show = (msg.proto == 0x98 || (msg.proto == 0x7C && !z)) && pn <= 300 ? pn : 6;
+        for (size_t k = 0; k < pn && k < show && o + 3 < cap; k++) o += (size_t)snprintf(out + o, cap - o, "%02x", pl[k]);
+        if (msg.dest && o + 20 < cap) o += (size_t)snprintf(out + o, cap - o, ">%llx", (unsigned long long)msg.dest);
+    }
+    if (p[0xB] && o + 12 < cap) {
+        o += (size_t)snprintf(out + o, cap - o, " footer ");
+        for (size_t k = n - p[0xB]; k < n && o + 3 < cap; k++) o += (size_t)snprintf(out + o, cap - o, "%02x", p[k]);
     }
 }

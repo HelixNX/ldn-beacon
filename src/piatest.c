@@ -51,6 +51,7 @@ int main(int argc, char **argv) {
     char ssid_name[16][64];
     u32 ips[8], as_ip = 0;
     int nssid = 0, nip = 0;
+    bool all = false;                                       /* "all": every packet's messages, and whether they parse */
     PiaMap map = {0};
     for (int i = 4; i < argc; i++) {
         unsigned a, b, c, d;
@@ -66,7 +67,18 @@ int main(int argc, char **argv) {
             as_ip = a << 24 | b << 16 | c << 8 | d;
         else if (!strncmp(argv[i], "ip:", 3) && sscanf(argv[i] + 3, "%u.%u.%u.%u", &a, &b, &c, &d) == 4 && nip < 8)
             ips[nip++] = a << 24 | b << 16 | c << 8 | d;
-        else if (!strncmp(argv[i], "hex:", 4) && nssid < 16 && unhex(argv[i] + 4, ssid[nssid], 16))
+        else if (!strcmp(argv[i], "all"))
+            all = true;
+        else if (!strncmp(argv[i], "pkt:", 4) && npk < 4096) {     /* pkt:<src ip>:<hex>, a Pia packet from a log */
+            const char *x = strchr(argv[i] + 4, ':');
+            size_t hl = x ? strlen(x + 1) : 0;
+            Pkt *k = &pk[npk];
+            if (sscanf(argv[i] + 4, "%u.%u.%u.%u", &a, &b, &c, &d) != 4 || !hl || hl % 2 || hl / 2 > sizeof k->p ||
+                !unhex(x + 1, k->p, hl / 2)) { fprintf(stderr, "bad %s\n", argv[i]); return 2; }
+            k->src = a << 24 | b << 16 | c << 8 | d;
+            k->n = hl / 2;
+            npk++;
+        } else if (!strncmp(argv[i], "hex:", 4) && nssid < 16 && unhex(argv[i] + 4, ssid[nssid], 16))
             snprintf(ssid_name[nssid++], 64, "%s", argv[i]);
         else if (!strncmp(argv[i], "str:", 4) && nssid < 16) {
             memset(ssid[nssid], 0, 16);
@@ -75,12 +87,13 @@ int main(int argc, char **argv) {
             snprintf(ssid_name[nssid++], 64, "%s", argv[i]);
         } else fprintf(stderr, "ignored: %s\n", argv[i]);
     }
-    FILE *f = fopen(argv[1], "rb");
-    if (!f) { fprintf(stderr, "cannot open %s\n", argv[1]); return 1; }
+    bool from_pcap = strcmp(argv[1], "-") != 0;             /* "-": only the pkt: packets */
+    FILE *f = from_pcap ? fopen(argv[1], "rb") : NULL;
+    if (from_pcap && !f) { fprintf(stderr, "cannot open %s\n", argv[1]); return 1; }
     u8 gh[24];
-    if (fread(gh, 1, 24, f) != 24) return 1;
+    if (f && fread(gh, 1, 24, f) != 24) return 1;
     static u8 p[65536], out[65536];
-    for (;;) {
+    while (f) {
         u8 rh[16];
         if (fread(rh, 1, 16, f) != 16) break;
         u32 cl = (u32)rh[8] | (u32)rh[9] << 8 | (u32)rh[10] << 16 | (u32)rh[11] << 24;
@@ -90,7 +103,13 @@ int main(int argc, char **argv) {
         if (rl >= cl) continue;
         size_t on;
         u64 pn;
-        if (!ccmp_hdr_len(p + rl, cl - rl) || !(p[rl + 1] & 0x40) || !ccmp_decrypt(dkey, p + rl, cl - rl, out, &on, &pn))
+        size_t mh = ccmp_hdr_len(p + rl, cl - rl);
+        if (!mh || !(p[rl + 1] & 0x40)) continue;
+        const u8 *fb = p + rl + mh + 8;                     /* the S3's: decrypted by the radio, CCMP header and MIC kept */
+        if (cl - rl >= mh + 8 + 8 + 8 && fb[0] == 0xAA && fb[1] == 0xAA && fb[2] == 0x03) {
+            on = cl - rl - mh - 8 - 8;
+            memcpy(out, fb, on);
+        } else if (!ccmp_decrypt(dkey, p + rl, cl - rl, out, &on, &pn))
             continue;
         if (on < 8 + 28 || out[6] != 0x08 || out[7] != 0x00 || out[8 + 9] != 17) continue;
         const u8 *ip = out + 8;
@@ -139,7 +158,9 @@ int main(int argc, char **argv) {
                        v.ip_le ? "LE" : "BE", v.aad, good, npk);
                 memcpy(b, pk[0].p, pk[0].n);
                 pia_decrypt(&net, &v, ips[ii], b, pk[0].n);
-                printf("  first packet's messages:\n");
+                printf("  first packet decrypted:");
+                for (size_t k = 0; k < pk[0].n; k++) printf("%s%02x", k % 32 ? "" : "\n    ", b[k]);
+                printf("\n  first packet's messages:\n");
                 pia_dump(b, pk[0].n);
                 if (map.n && as_ip) {
                     static u8 w[2048];
@@ -152,7 +173,16 @@ int main(int argc, char **argv) {
                         printf("  rewritten: %u replaced, %zu -> %zu bytes, encrypted as from %u.%u.%u.%u: %s\n", rep,
                                pk[0].n, wn, as_ip >> 24, as_ip >> 16 & 255, as_ip >> 8 & 255, as_ip & 255,
                                back ? "decrypts again" : "DOES NOT DECRYPT");
-                        if (back) pia_dump(w, wn);
+                        if (back) {
+                            printf("  rewritten, decrypted:");
+                            for (size_t k = 0; k < wn; k++) printf("%s%02x", k % 32 ? "" : "\n    ", w[k]);
+                            printf("\n");
+                            pia_dump(w, wn);
+                            pia_encrypt(&net, &v, as_ip, w, wn);
+                            printf("  rewritten, encrypted (pkt: input): ");
+                            for (size_t k = 0; k < wn; k++) printf("%02x", w[k]);
+                            printf("\n");
+                        }
                     }
                     memcpy(b, pk[0].p, pk[0].n);
                     pia_decrypt(&net, &v, ips[ii], b, pk[0].n);
@@ -161,6 +191,26 @@ int main(int argc, char **argv) {
                 pia_encrypt(&net, &v, ips[ii], b, pk[0].n);
                 printf("  re-encrypted: %s\n", memcmp(b, pk[0].p, pk[0].n) ? "DIFFERS" : "identical");
             }
+    if (all && nssid) {                                     /* the settled variant, each packet with its own source */
+        PiaVariant v = {0};
+        PiaNet net;
+        pia_net_init(&net, gkey, ssid[0], &v);
+        static u8 b[1500], w[2048];
+        for (int i = 0; i < npk; i++) {
+            memcpy(b, pk[i].p, pk[i].n);
+            bool ok = pia_decrypt(&net, &v, pk[i].src, b, pk[i].n);
+            PiaMap none = {0};
+            size_t wn = ok ? pia_rewrite(b, pk[i].n, w, sizeof w, &none, NULL) : 0;
+            printf("#%d %u.%u.%u.%u -> %u.%u.%u.%u, %zu bytes: %s%s\n    ", i, pk[i].src >> 24, pk[i].src >> 16 & 255,
+                   pk[i].src >> 8 & 255, pk[i].src & 255, pk[i].dst >> 24, pk[i].dst >> 16 & 255, pk[i].dst >> 8 & 255,
+                   pk[i].dst & 255, pk[i].n, ok ? "ok" : "DOES NOT AUTHENTICATE",
+                   !ok ? "" : !wn ? ", messages DO NOT PARSE" :
+                   wn == pk[i].n && !memcmp(w, b, wn) ? ", rewrites identical" : ", rewrite DIFFERS");
+            for (size_t k = 0; k < pk[i].n; k++) printf("%02x", b[k]);
+            printf("\n");
+            if (ok) pia_dump(b, pk[i].n);
+        }
+    }
     if (!found) printf("no candidate authenticates\n");
     return ok && found ? 0 : 1;
 }

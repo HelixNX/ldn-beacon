@@ -62,5 +62,8 @@ void pia_map_add(PiaMap *m, u32 from_ip, u32 to_ip, const u8 from_mac[6], const 
 size_t pia_rewrite(const u8 *in, size_t n, u8 *out, size_t cap, const PiaMap *m, unsigned *replaced);
 /* prints the messages of a decrypted packet (inflated), for piatest */
 void pia_dump(const u8 *p, size_t n);
+/* one line for a decrypted packet: destination / source variable id, packet id, footer, then each message as
+ * protocol/port, its message flags, size and the first payload bytes (inflated when compressed) */
+void pia_summary(const u8 *p, size_t n, char *out, size_t cap);
 
 #endif

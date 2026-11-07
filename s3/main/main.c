@@ -360,6 +360,22 @@ static esp_err_t ap_config(const S3Ap *a) {
     return err;
 }
 
+/* the AP's address can only change with Wi-Fi stopped: stop, set it, start again with promiscuous receive (the
+ * placeholder AP keeps running in between; the caller configures the network's AP right after) */
+static esp_err_t set_ap_mac(const uint8_t mac[6]) {
+    static const uint8_t zero[6];
+    if (!memcmp(mac, zero, 6) || !memcmp(mac, bssid, 6)) return ESP_OK;
+    esp_wifi_set_promiscuous(false);
+    esp_wifi_stop();
+    esp_err_t err = esp_wifi_set_mac(WIFI_IF_AP, mac);
+    if (err == ESP_OK) memcpy(bssid, mac, 6);
+    esp_err_t e2 = esp_wifi_start();
+    esp_wifi_set_ps(WIFI_PS_NONE);
+    esp_wifi_set_promiscuous(true);
+    logline("ap address " MACSTR ": %s (restart %s)", MAC2STR(mac), esp_err_to_name(err), esp_err_to_name(e2));
+    return err != ESP_OK ? err : e2;
+}
+
 static esp_err_t placeholder(uint8_t channel) {
     S3Ap a = {.channel = channel, .auth = S3_AUTH_WPA2, .hidden = 1, .max_sta = 1, .ssid_len = 32, .pass_len = 32};
     static const char hex[] = "0123456789abcdef";
@@ -489,7 +505,8 @@ static void handle(uint8_t type, const uint8_t *p, size_t n) {
         if (n >= sizeof(S3Ap)) {
             S3Ap a;
             memcpy(&a, p, sizeof a);
-            esp_err_t err = wifi_on ? ap_config(&a) : ESP_ERR_WIFI_NOT_STARTED;
+            esp_err_t err = wifi_on ? set_ap_mac(a.ap_mac) : ESP_ERR_WIFI_NOT_STARTED;
+            if (err == ESP_OK) err = ap_config(&a);
             logline("ap: \"%.*s\" channel %u, %s%s%s, vendor element %u bytes: %s", a.ssid_len, a.ssid, a.channel,
                     a.auth == S3_AUTH_WPA2 ? "WPA2" : "open", a.hidden ? ", hidden" : "",
                     a.ldn ? ", LDN (no 4-way handshake, data key in hardware)" : "", a.vie_len, esp_err_to_name(err));

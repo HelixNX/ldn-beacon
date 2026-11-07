@@ -311,6 +311,9 @@ bool s3_radio_open(Radio *r, const char *port, u8 channel, bool filter_all, char
     memcpy(r->sta_mac, l->hello.sta_mac, 6);
     S3Open o = {.channel = channel, .filter = filter_all};
     S3ApDone d = {-1};
+    /* an S3 left in station mode by ldnjoin (Wi-Fi still on) refuses OPEN with ESP_ERR_WIFI_MODE: back to AP first
+       (no reply; handled in order) */
+    s3_send(l, S3_LEAVE, NULL, 0);
     if (!s3_send(l, S3_OPEN, &o, sizeof o) || !s3_wait(r, S3_AP_DONE, 5000) || l->wait_len < sizeof d ||
         (memcpy(&d, l->wait_buf, sizeof d), d.err)) {
         snprintf(err, errn, "%s: the S3 did not start Wi-Fi on channel %u (esp_err 0x%x)", l->port, channel, (unsigned)d.err);
@@ -422,6 +425,7 @@ bool s3_ap_start(Radio *r, const ApConfig *c, char *err, size_t errn) {
     a.vie_len = sizeof nintendo;
     a.ldn = 1;                  /* no 4-way handshake; the data key into the hardware for each station */
     memcpy(a.ldn_key, c->data_key, 16);
+    memcpy(a.ap_mac, c->bssid, 6);
     S3ApDone d = {-1};
     if (!s3_send(l, S3_AP, &a, sizeof a) || !s3_wait(r, S3_AP_DONE, 5000) || l->wait_len < sizeof d ||
         (memcpy(&d, l->wait_buf, sizeof d), d.err)) {
@@ -429,7 +433,9 @@ bool s3_ap_start(Radio *r, const ApConfig *c, char *err, size_t errn) {
         return false;
     }
     l->ap_up = true;
-    logf_(0, "ap: S3 SoftAP, channel %u, SSID %s (hidden), %s, %s", c->channel, c->ssid,
+    static const u8 zero[6];
+    if (memcmp(c->bssid, zero, 6)) memcpy(r->mac, c->bssid, 6);
+    logf_(0, "ap: S3 SoftAP, BSSID " MAC_FMT ", channel %u, SSID %s (hidden), %s, %s", MAC_ARG(r->mac), c->channel, c->ssid,
           c->open ? "open (no RSN element)" : "WPA2", "no 4-way handshake: the data key in its hardware");
     return true;
 }

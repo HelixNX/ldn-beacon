@@ -63,6 +63,7 @@ typedef struct ApConfig {
     int psk_mode;
     bool open;                  /* s3: an open AP instead of WPA2 (whether the Switch associates then: to test) */
     const char *log_path;       /* wifi: hostapd's debug log */
+    u8 bssid[6];                /* s3: the AP's address for this network (all zero: keep it); r->mac follows */
 } ApConfig;
 bool radio_ap_start(Radio *r, const ApConfig *c, char *err, size_t errn);
 void radio_ap_stop(Radio *r);

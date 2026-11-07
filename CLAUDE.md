@@ -35,7 +35,7 @@ Ryujinx are for behaviour only: our own implementation.
 | `src/bridge.c` | stage 3: IPv4 / UDP / ARP for the room <-> air bridge (checksums); bridgetest checks it |
 | `src/ldnbeacon.c` | the beacon (Linux with mon0 + hostapd, or any OS with the S3): joins the room, Scans for a host, hosts its network on the air (advertisements on mon0, hostapd for association), answers the LDN authentication, joins the Switch to the room host, bridges its UDP (Pia re-addressed and rewritten); logs it all, compile time first |
 | `src/pia.c` | Pia 6.x in LDN mode: CRC-32, AES-GCM (8-byte tag), session key and nonce, message parse / rewrite of addresses and constant ids (zlib) |
-| `src/piatest.c` | GCM against NIST's vector; finds the Pia variant that authenticates a capture's Pia packets; `map:` / `as:` round-trip a rewrite |
+| `src/piatest.c` | GCM against NIST's vector; finds the Pia variant that authenticates a capture's Pia packets (or `pkt:<src ip>:<hex>` packets from a log, capture `-`); prints the first decrypted; `map:` / `as:` round-trip a rewrite and print the result as a `pkt:` input |
 | `src/ldnjoin.c` | the S3 joins a real console's network as a station (design item 2's first half): scans 6 / 1 / 11 for an advertisement, joins, sends the LDN authentication request (`ldn_auth_request`), answers ARP, logs every UDP packet from the host and tries each Pia packet against the candidate key / nonce derivations; sends nothing to the game. `build/ldnjoin.exe [--channels 6,1,11] [--pcap file] [--token raw]` |
 | `src/roomtest.c` | joins a room, `--scan` broadcasts LDN Scans and prints the networks hosts answer with (`--dump dir`: their raw NetworkInfo); any OS |
 | `scripts/radio-check.sh` | first radio test on the laptop: card modes, a capture on channels 1 / 6 / 11 |
@@ -256,7 +256,7 @@ constant id c00102a800020000 (from 02:00:c0:a8:01:02), the network id, and Stati
 host) and 192.168.1.3:12345 (the slot for the joining station: our room address), so the Switch (169.254.50.2) does
 not find itself. Message format (5.27-6.30) as the wiki has it: u8 field flags (1 message flags, 2 u16 size, 4 u8
 protocol + u24 port, 8 u64 destination; absent fields from the previous message; upper bits seen set, no fields),
-payload, padded to 4; 0xFF pads the messages to 16. Now `pia_rewrite` (pia.c, zlib) inflates compressed payloads,
+payload, no padding between messages (S3 run 8; the wiki's "padded to 4" is wrong here); 0xFF pads the messages to 16. Now `pia_rewrite` (pia.c, zlib) inflates compressed payloads,
 replaces every node's IPv4 and MAC-made constant id with the other side's (room -> air: node i's room address and
 room MAC -> 169.254.X.(i+1) and the air's MAC: the host's is our BSSID, ours the Switch's real one; air -> room the
 reverse), deflates, writes every message's fields out and re-encrypts; piatest's round trip on run 15's packet: 3
@@ -274,7 +274,7 @@ BSSID), its ARP reply to .1 too: the beacon takes those already (on_frame, by IP
 If the Switch lists nothing: it may scan actively (probe requests in the log; answer them), or the card may refuse
 injection on mon0 (status line: frames sent / failed).
 
-**Superseded by "Switch hosts, the S3 joins" at the end (2026-11-07): read that first.** Earlier state (after S3 run 3): the ESP32-S3 on the desktop is the antenna now (section "ESP32-S3
+**Superseded: the room-hosted raid works since S3 run 7 (end of this file): read that first.** Earlier state (after S3 run 3): the ESP32-S3 on the desktop is the antenna now (section "ESP32-S3
 as the antenna"); the laptop is only a fallback. Room hosts, Switch joins: it finds the network, associates,
 authenticates, takes its address, answers group and unicast ARP, and gets the host's Pia packets re-addressed with
 the addresses inside rewritten, but **sends no Pia (no IPv4 UDP) and leaves after ~4.6 s** (console "2318-0533").
@@ -422,5 +422,62 @@ way, and the Switch still sends no Pia and leaves after ~4.6 s (2318-0533). Rema
   frames it sends is unchecked.
 - Smaller: kinnay picks the network's third octet in 1..127; ours has been up to 199 (runs 3, 11). The recomp host
   advertises platform 0 / "Player" and a zero server random.
-Next (after a context reset, the user's call): pick one of these; the cheapest decisive one is probably a sniff of our
-own transmissions with the laptop while a Switch joins the room through the S3.
+
+**Found 2026-11-07 (after join run 7), comparing our rewritten host packet with a real Switch host's, decrypted
+(piatest `pkt:`): `pia_rewrite` padded each message to 4 with `00`, a real host (and the recomp) with `FF`** (the
+Switch's 79-byte message, then one `ff`). A receiver reads that `00` as the next message's field flags (no fields: the
+previous size, 62 bytes), runs past the end and drops the packet. Every rewritten host packet from run 15 to S3 run 6
+had it (63 -> 62 bytes of deflate, so 2 pad bytes): the likeliest reason the Switch never answered. Fixed, and with
+the rest of an audit against the real host's bytes (the user asked: nothing assumed that a real console contradicts):
+- deflate: level 5, the original's window, a sync flush then an empty final block (`00 00 ff ff 03 00`, as Pia's
+  streams end): reproduces the Switch's stream byte for byte. piatest round trip of all 40 logged host packets of join
+  run 7, air -> room -> air: byte for byte identical (encrypted).
+- the Net 0x11 station entries are 21 bytes (state, ranking, disconnection candidate, 16-byte address, port: no
+  "kicking" byte in 6.16-6.23); the ranking follows the constant ids ascending in both messages seen, so the rewrite
+  ranks again from the new ids (only when the incoming message follows that rule). Before, the room's order was kept,
+  which could contradict the ids on the air.
+- advertisement nonce: a real host adds 1 when a station joins (6e88ab97 -> 6e88ab98); ours took a random one (could
+  go backwards). Now +1. Subnet octet 1..127 (kinnay's; hosts seen 27, 12), was 1..254.
+- `--bcast-mode` default 2: the first join gets the broadcasts as group frames, as a real host sends them, the next as
+  unicast. The log line for the network now has security level / accept policy (a Switch host: 1 / 0) to check the
+  recomp's against.
+Checked and the same as a real host: the advertisement layout (re-encodes identical), Pia header, crypto, Net message
+fields, IPv4 / UDP. Unknown still: the 802.11 framing the S3 really sends (a sniff with a second radio would show it).
+
+**S3 run 7 (2026-11-07, `captures/20261107-s3-run7/`): IT WORKS. The Switch joined the recomp's Tera raid through the
+room and the S3 on its first join and got into the raid; then I stopped ldnbeacon mid-raid (around 11:57:20, right
+after the Switch's traffic jumped ~5x, likely the battle starting), which disbanded it. A whole raid is not yet
+proven: next run, the beacon is stopped only when the user says the raid is over.** Joined
+11:56:16 (169.254.108.2; first join, so the broadcasts went as group frames and the group ARP probe was answered),
+within a second the Switch sent its own Pia (Net 0x2C, then 0x98 messages) and it flowed both ways; first minute:
+608 frames to the air, 818 to the room, nothing dropped, every Pia packet authenticated. ~1/3 of the Pia packets'
+messages "do not parse" (only re-addressed, so any addresses inside stay the sender's side's); harmless so far,
+but the first place to look if something breaks later (another protocol's message layout, or the
+footer). Also fixed for this run: an S3 left in station mode by ldnjoin refused OPEN (ESP_ERR_WIFI_MODE), so
+radio_s3 sends S3_LEAVE first (the firmware's own open could do it too, next time it is flashed).
+**S3 run 8 (2026-11-07, `captures/20261107-s3-run8/`): Union Circle works (10 min, both ways); the raid does
+not**: the Switch joins (the "ding") but is never added as a battle member, then 2-ALZYA-0010 ("communication with
+the other Trainer was interrupted"). Cause: **Pia messages are not padded to 4 in this version** (wiki wrong for
+version 11): the raid's packets bundle several messages back to back (a 31-byte message, then the next one's field
+flags), so our parser (aligning to 4) failed on them ("do not parse", >half of all packets, addresses inside left
+as the sender's), and our writer's per-message FF padding would end a packet after its first message. The earlier FF
+"padding" seen after single messages was only the end-of-packet padding to 16. Fixed: no alignment, each message
+written with its original field flags (size added when it changed). piatest `all` on the raid's 302 Switch packets:
+every one parses and rewrites byte for byte; join run 7's 40 still round-trip. Next: an S3 run of a raid with it.
+S3 runs 9-12 (2026-11-07): with the parsing fixed (run 9: every packet parses) the raid still failed the same way.
+Run 10 / 11 logged every Pia packet both ways (`pia R>A` / `A>R` lines: header ids, each message's protocol/port,
+flags, size, first bytes; session 0x98 and reliable 0x7C messages in full, also after the rewrite): Pia was fine
+(join request / response, update session all translated right, both 0x81 streams sent and acked, RTT 0x58 running),
+but ~30 s after joining the host sent Left station sync (0x98 type 7) and dropped the Switch. **Cause: the host's
+game data carries its Pia constant id little-endian inside the game's own zlib data** (a reliable 0x7C message,
+framing `1f` + u24 length + ..., the game payload compressed: `...83 0000 0200a80101c0` = c00101a800020000, from the
+recomp's room MAC 02:00:c0:a8:01:01), beyond the reach of the rewrite. **Fix: the ids are made equal on both sides
+instead**: S3Ap.ap_mac (S3 protocol version 5; the firmware stops Wi-Fi, sets the AP MAC, starts again) makes the
+S3's BSSID the room host's MAC, and the room Connect carries the Switch's real MAC (the recomp takes the NodeInfo as
+it is). Only IPs are still rewritten (the game data seen carries none). Linux / hostapd cannot change its BSSID per
+network: there the ids still differ.
+**Run 12 (`captures/20261107-s3-run12/`): three complete Tera raids, a real Switch joining the recomp's (4.6, 6.0,
+6.5 min, each ending in a normal leave), no drops, nothing unparsed; the user: "Game is working very well".** Not
+tried yet: a trade.
+Open now: several Switches; the Switch hosting with the room joining (design item 2: ldnjoin
+is its first half); nxrecomp's CreateNetwork without a random security parameter.

@@ -18,7 +18,7 @@ bool host_session_update(HostSession *s, const LdnNetworkInfo *n) {
     random_bytes(&s->nonce, 4);
     u8 x;
     random_bytes(&x, 1);
-    s->subnet = (u8)(1 + x % 254);
+    s->subnet = (u8)(1 + x % 127);                 /* 1..127 as kinnay's host (Switch hosts seen: 27, 12) */
     return true;
 }
 
