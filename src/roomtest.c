@@ -1,14 +1,30 @@
 /* roomtest: joins a room and shows its local-play traffic, to check the room side of the beacon on any machine.
- *   roomtest --room host[:port] [--nick name] [--password pw] [--scan] [--log 0-2]
+ *   roomtest --room host[:port] [--nick name] [--password pw] [--scan] [--dump dir] [--log 0-2]
  * --scan broadcasts an LDN Scan every 2 s, as a console searching for networks would, and prints each network an
  * access point in the room answers with (a recomp or Eden instance hosting local play). Every LDN message is
- * printed; proxy datagrams are counted (log 2: each one). */
+ * printed; proxy datagrams are counted (log 2: each one). --dump dir writes each distinct NetworkInfo's raw 0x480 bytes
+ * to dir/netinfo-N.bin (to compare with what advdump decodes from a real console). */
 #include "ldn.h"
 #include "room.h"
 #include <stdlib.h>
 #include <signal.h>
 
 static volatile sig_atomic_t quit;
+static const char *dump_dir;
+
+static void dump_network(const LdnNetworkInfo *n) {
+    static LdnNetworkInfo last;
+    static int count;
+    if (!dump_dir || (count && !memcmp(&last, n, sizeof last))) return;
+    last = *n;
+    char path[512];
+    snprintf(path, sizeof path, "%s/netinfo-%d.bin", dump_dir, count++);
+    FILE *f = fopen(path, "wb");
+    if (!f) { logf_(0, "roomtest: cannot write %s", path); return; }
+    fwrite(n, sizeof *n, 1, f);
+    fclose(f);
+    logf_(0, "  written to %s", path);
+}
 static void on_sigint(int s) { (void)s; quit = 1; }
 
 static void print_network(const LdnNetworkInfo *n) {
@@ -40,6 +56,7 @@ static void on_ldn(const RoomLdn *p, void *ud) {
         LdnNetworkInfo n;
         memcpy(&n, p->data, sizeof n);
         print_network(&n);
+        dump_network(&n);
     } else if ((p->type == LDN_CONNECT || p->type == LDN_DISCONNECT) && p->size >= sizeof(LdnNodeInfo)) {
         LdnNodeInfo d;
         memcpy(&d, p->data, sizeof d);
@@ -71,8 +88,9 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--password") && v) c.password = v, i++;
         else if (!strcmp(a, "--log") && v) log_level = atoi(v), i++;
         else if (!strcmp(a, "--scan")) scan = true;
+        else if (!strcmp(a, "--dump") && v) dump_dir = v, i++;
         else {
-            fprintf(stderr, "usage: roomtest --room host[:port] [--nick name] [--password pw] [--scan] [--log 0-2]\n");
+            fprintf(stderr, "usage: roomtest --room host[:port] [--nick name] [--password pw] [--scan] [--dump dir] [--log 0-2]\n");
             return 2;
         }
     }

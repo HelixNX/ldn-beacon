@@ -17,9 +17,14 @@ Ryujinx are for behaviour only: our own implementation.
 |---|---|
 | `src/room.c`, `room.h` | room client (ENet + zstd), single-threaded and portable; from nxrecomp's `runtime/net/room.c` |
 | `src/ldn.h` | LDN structures as the room carries them (NetworkInfo 0x480, NodeInfo 0x40; as nxrecomp's `ldn_net.c`) |
-| `src/roomtest.c` | joins a room, `--scan` broadcasts LDN Scans and prints the networks hosts answer with; any OS |
+| `src/rd.h` | bounds-checked byte reader / writer: every parse of a frame from the air goes through it |
+| `src/crypto.c` | AES-128 (block, CTR) and SHA-256, our own (no crypto library needed) |
+| `src/ldnkeys.c` | loads `prod.keys` + `ldn.txt` at run time, derives the advertisement / data keks |
+| `src/adv.c` | advertisement decode / encode (CTR, hash check) and to / from a room NetworkInfo |
+| `src/advdump.c` | decrypts the advertisements in a pcap (radiotap or bare 802.11), prints them, checks re-encoding; any OS |
+| `src/roomtest.c` | joins a room, `--scan` broadcasts LDN Scans and prints the networks hosts answer with (`--dump dir`: their raw NetworkInfo); any OS |
 | `scripts/radio-check.sh` | first radio test on the laptop: card modes, a capture on channels 1 / 6 / 11 |
-| `build.bat` / `CMakeLists.txt` | Windows (roomtest only: clang-cl via `../nxrecomp/tools/vcenv.bat`, vcpkg enet zstd); Linux: `cmake -B build && cmake --build build` (pacman: base-devel cmake enet zstd) |
+| `build.bat` / `CMakeLists.txt` | `ldncore` (crypto, keys, advertisement; no network libraries), `room`, the tools. Windows (roomtest and advdump: clang-cl via `../nxrecomp/tools/vcenv.bat`, vcpkg enet zstd); Linux: `cmake -B build && cmake --build build` (pacman: base-devel cmake enet zstd) |
 
 Checked 2026-11-06: two roomtest clients in our room_server (192.168.1.1 / .2), Scans relayed.
 
@@ -58,8 +63,10 @@ Big-endian unless stated.
 - **Keys:** dec(master_key_00, aes_kek_generation_source) -> k1; dec(k1, input key) -> k2;
   dec(k2, aes_key_generation_source) -> k3; key = dec(k3, first 16 bytes of SHA-256(input buffer)). Advertisement:
   input buffer = the 32-byte session info, the advertisement input key. Data frames: input buffer = server random +
-  the game's passphrase, the data input key. (Cipher for the "dec" steps presumably AES-128-ECB; CTR counter / how
-  the nonce is used: not documented, to be found against the capture.)
+  the game's passphrase, the data input key. Verified against the capture 2026-11-06: the "dec" steps are AES-128-ECB; the
+  advertisement's CTR counter is the nonce's 4 bytes as sent, then 12 zero bytes (128-bit big-endian counter); the
+  hash is SHA-256 over the whole payload (session info .. data) with the hash field zeroed, and it matched. The
+  capture's data: security level 1, accept policy 0, channel word 0x080B (11 | band 2 << 10), max 4, current 1.
 - **Network:** SSID = 32 random hex digits (the session info's 16 bytes), zeroed in beacons; channels 1 / 6 / 11
   (also 36 / 40 / 44 / 48). Association is open system; our capture's beacon nevertheless has an RSN element
   (WPA2-PSK, CCMP): the data key is probably the PSK / PMK (to verify).
@@ -85,10 +92,30 @@ Captures (`captures/<date>/`, git-ignored; `scripts/capture.sh` makes them, `rad
   WPA2-PSK CCMP, HT / HE elements, vendor 00 22 aa 10 01 02, WMM). This is the test vector for the key derivation:
   decrypting it must give a sane NetworkInfo. capture.sh's tcpdump filter for these frames counted 0 although they
   are there: to be replaced by a plain byte search.
+  Decrypted 2026-11-06 (`build/advdump captures/20261107-032045-vif/ch11.pcap`): all 278 pass the hash and
+  re-encode byte for byte; scene 5, 1 of 4 participants, participant 0 the host at 169.254.27.1 with platform 1
+  (a Switch 2), app version 21, app data 0x84 bytes. The app data holds ASCII "1362" at 0x5C, which the user thinks
+  was the link code: so a link-code search probably filters scan results on the console (no connection to ask). To
+  confirm: two captures with different codes, diffed.
+- **A recomp hosting a raid in our room** (2026-11-06, `roomtest --scan --dump`, code 0575): its NetworkInfo's
+  advertise data has the same layout as the Switch's app data, the link code in ASCII at 0x5C in both (confirmed:
+  the console filters scans on it); they differ only at 5-8 and 0x7D-0x7F (per-session values). The recomp leaves
+  security_parameter and random_authentication_id zero and calls itself "Player": so when the room hosts, the
+  beacon makes up the server random and auth token itself (the guesses in `adv_to_network_info` do not matter to
+  the recomp). Its SSID is Eden's "YuzuFakeSsidForLdn" (the beacon uses the session id's hex). It advertised local
+  communication id 01008F6008C5E000 (the title id) where the Switch uses the NACP's 0100A3D008C5C000: a real
+  console would not list it. Fixed in nxrecomp's `ldn_net.c` (the NACP's first LocalCommunicationId at 0x30B0),
+  checked: the rebuilt recomp advertises 0100A3D008C5C000 (codes 0575, 7718, 2017 all at app data 0x5C).
 
-Next: (1) the advertisement decryption against the capture (keys from ../keys/prod.keys + ../keys/ldn.txt; find the
-CTR counter layout); (2) building our own advertisement + beacon from a room NetworkInfo; (3) hosting: two monitor
+Next: (2) building our own advertisement + beacon from a room NetworkInfo; (3) hosting: two monitor
 interfaces as kinnay, or hostapd if it receives what it must; association, the authentication exchange, data.
+
+## Language (open question, for later)
+
+Asked 2026-11-06 whether Rust would suit the beacon better than C; the user chose to continue in C for now and decide
+later. For Rust: parsing frames anyone in radio range can send, as root; RustCrypto crates. For C: room.c is shared
+with nxrecomp (Rust would keep it through FFI), one toolchain, the hard parts are radio and protocol, not language.
+C meanwhile parses only through `src/rd.h`.
 
 ## ESP32-S3 instead of a laptop (option, not started)
 

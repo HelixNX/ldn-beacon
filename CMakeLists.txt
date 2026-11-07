@@ -31,7 +31,15 @@ else()
     add_compile_options(-Wall -Wextra)
 endif()
 
-add_library(room STATIC src/common.c src/room.c)
+# LDN itself (crypto, keys, the advertisement), no network libraries: builds anywhere
+add_library(ldncore STATIC src/common.c src/crypto.c src/ldnkeys.c src/adv.c)
+target_include_directories(ldncore PUBLIC src)
+
+add_executable(advdump src/advdump.c)
+target_link_libraries(advdump PRIVATE ldncore)
+
+add_library(room STATIC src/room.c)
+target_link_libraries(room PUBLIC ldncore)
 target_include_directories(room PUBLIC src "${ENET_INCLUDE}" "${ZSTD_INCLUDE}")
 target_link_libraries(room PUBLIC "${ENET_LIB}" "${ZSTD_LIB}" ${PLATFORM_LIBS})
 
