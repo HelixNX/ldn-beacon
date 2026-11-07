@@ -22,6 +22,10 @@ Ryujinx are for behaviour only: our own implementation.
 | `src/ldnkeys.c` | loads `prod.keys` + `ldn.txt` at run time, derives the advertisement / data keks |
 | `src/adv.c` | advertisement decode / encode (CTR, hash check) and to / from a room NetworkInfo |
 | `src/advdump.c` | decrypts the advertisements in a pcap (radiotap or bare 802.11), prints them, checks re-encoding; any OS |
+| `src/frames.c` | stage 1: the beacon (a Switch's elements) and advertisement for a room network, with the values a console makes up (server random, auth token, nonce, 169.254.X subnet) |
+| `src/frametest.c` | writes those frames for a saved NetworkInfo as a pcap (advdump decodes it); any OS |
+| `src/radio.c` | Linux: mon0 next to the Wi-Fi interface (as capture.sh), services stopped and restored, raw 802.11 send / receive |
+| `src/ldnbeacon.c` | Linux, the beacon: joins the room, Scans for a host, puts its network on the air every 100 ms; logs probe requests, joins to us and other consoles |
 | `src/roomtest.c` | joins a room, `--scan` broadcasts LDN Scans and prints the networks hosts answer with (`--dump dir`: their raw NetworkInfo); any OS |
 | `scripts/radio-check.sh` | first radio test on the laptop: card modes, a capture on channels 1 / 6 / 11 |
 | `build.bat` / `CMakeLists.txt` | `ldncore` (crypto, keys, advertisement; no network libraries), `room`, the tools. Windows (roomtest and advdump: clang-cl via `../nxrecomp/tools/vcenv.bat`, vcpkg enet zstd); Linux: `cmake -B build && cmake --build build` (pacman: base-devel cmake enet zstd) |
@@ -107,7 +111,13 @@ Captures (`captures/<date>/`, git-ignored; `scripts/capture.sh` makes them, `rad
   console would not list it. Fixed in nxrecomp's `ldn_net.c` (the NACP's first LocalCommunicationId at 0x30B0),
   checked: the rebuilt recomp advertises 0100A3D008C5C000 (codes 0575, 7718, 2017 all at app data 0x5C).
 
-Next: (2) building our own advertisement + beacon from a room NetworkInfo; (3) hosting: two monitor
+Stage 1 written 2026-11-06 (ldnbeacon): our frames checked on Windows (frametest -> advdump; the beacon's elements
+equal the Switch's but the channel); not yet run on the laptop (now a fresh CachyOS ISO). Test: room server on the
+PC, the recomp hosting a raid in it, `sudo ./build/ldnbeacon --room <PC>:24872`, the Switch searches by link code.
+If the Switch lists nothing: it may scan actively (probe requests in the log; answer them), or the card may refuse
+injection on mon0 (status line: frames sent / failed).
+
+Next: (3) hosting: two monitor
 interfaces as kinnay, or hostapd if it receives what it must; association, the authentication exchange, data.
 
 ## Language (open question, for later)
