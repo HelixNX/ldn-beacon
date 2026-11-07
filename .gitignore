@@ -1,0 +1,4 @@
+build/
+captures/
+radio-check/
+*.pcap
