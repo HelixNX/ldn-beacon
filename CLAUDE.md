@@ -277,7 +277,7 @@ messages (join, lobby, battle), whatever else Pia checks against the MAC. Open: 
 reach the Switch (fine for one Switch); relayed frames from a third member (addr2 their MAC, as kinnay); nxrecomp's
 CreateNetwork should make a random security parameter as a console does (the beacon copies whatever the host has);
 the Switch hosting with the room joining (design item 2) is not started.
-Running it: `E:\RUN.txt` (or the stick's root): unzip with -DD, clean build, then ldnbeacon; results to the stick;
+Running it: `RUN.txt` at the stick's root: unzip with -DD, clean build, then ldnbeacon; results to the stick;
 saved here as `captures/<date>-beacon-runN/`. The zip carries `../keys/prod.keys` and `ldn.txt`.
 
 ## Language (open question, for later)
