@@ -344,3 +344,10 @@ channel 6):
   its gratuitous ARP, ARP replies to .1 and IPv6 noise, **no IPv4 UDP**, and leaves after 4.66 s (reason 3; on the
   console "2318-0533"). So the remaining problem is Pia, not the radio. Note: the S3 does not capture its own
   transmissions, so our frames are not in the pcap.
+- Found afterwards (2026-11-07, piatest on run 15's host packet, `pia_dump` now prints the zlib header): the host's
+  compressed Net message starts `48 4b` (a 4 KB window), and `pia_rewrite` recompressed with zlib's default
+  (`78 9c`, 32 KB). An inflater set up for a 4 KB window rejects that header, so the Switch probably dropped every
+  rewritten host message since run 15, which fits "it never answers". Now deflated with the original's window
+  (level 2, so the header is `48 4b` again); piatest round trip ok. Next S3 run tests it. The Net message is
+  UpdateNetworkConnectionStatus (0x11, re-sent every 500 ms until acked; kinnay's Net-Protocol): the Switch should
+  answer with 0x12.

@@ -203,10 +203,19 @@ size_t pia_rewrite(const u8 *in, size_t n, u8 *out, size_t cap, const PiaMap *m,
             unsigned r = rewrite_bytes(raw, rn, m);
             rep += r;
             if (r) {
-                uLongf cn = sizeof comp;
-                if (compress2(comp, &cn, raw, rn, Z_DEFAULT_COMPRESSION) != Z_OK) return 0;
+                /* same window as the original stream's header (Pia: 48 xx, a 4 KB window): an inflater set up for
+                   that window rejects zlib's default 32 KB header (78 9c) */
+                int wbits = (msg.payload[0] >> 4) + 8;
+                if (wbits < 9 || wbits > 15) wbits = 12;
+                z_stream zs = {0};
+                if (deflateInit2(&zs, 2, Z_DEFLATED, wbits, 8, Z_DEFAULT_STRATEGY) != Z_OK) return 0;
+                zs.next_in = raw; zs.avail_in = (uInt)rn;
+                zs.next_out = comp; zs.avail_out = sizeof comp;
+                int zr = deflate(&zs, Z_FINISH);
+                pn = zs.total_out;
+                deflateEnd(&zs);
+                if (zr != Z_STREAM_END) return 0;
                 pl = comp;
-                pn = cn;
             }
         } else if (pn <= sizeof raw) {
             memcpy(raw, pl, pn);
@@ -243,9 +252,10 @@ void pia_dump(const u8 *p, size_t n) {
         uLongf rn = sizeof raw;
         bool z = (msg.mflags & 0x20) && uncompress(raw, &rn, msg.payload, msg.size) == Z_OK;
         if (z) { pl = raw; pn = rn; }
-        printf("    message: flags %02x, message flags %02x, protocol %02x port %06x, destination %016llx, %u bytes%s:",
-               msg.flags, msg.mflags, msg.proto, msg.port, (unsigned long long)msg.dest, msg.size,
-               z ? " (inflated)" : "");
+        printf("    message: flags %02x, message flags %02x, protocol %02x port %06x, destination %016llx, %u bytes",
+               msg.flags, msg.mflags, msg.proto, msg.port, (unsigned long long)msg.dest, msg.size);
+        if (z) printf(" (zlib header %02x %02x, %u inflated)", msg.payload[0], msg.payload[1], (unsigned)rn);
+        printf(":");
         for (size_t k = 0; k < pn; k++) printf("%s%02x", k % 32 ? "" : "\n      ", pl[k]);
         printf("\n");
     }
