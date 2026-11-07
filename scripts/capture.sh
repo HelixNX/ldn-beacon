@@ -30,6 +30,7 @@ echo "interface $IF, $SECS s per channel, into $OUT"
 
 PHY=$(iw dev "$IF" info | awk '$1 == "wiphy" { print "phy" $2 }')
 CAP=$IF
+STOPPED=
 [ -n "$VIF" ] && CAP=mon0
 restore() {
     [ -n "$VIF" ] && iw dev mon0 del 2> /dev/null
