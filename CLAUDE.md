@@ -18,7 +18,7 @@ Ryujinx are for behaviour only: our own implementation. **The protocol, the radi
 |---|---|
 | Build (Windows: Visual Studio's clang-cl, `vcpkg install enet zstd zlib`) | `build.bat` (or `..\start.ps1 build beacon`) |
 | Build (Linux) | `cmake -B build && cmake --build build` (pacman: base-devel cmake enet zstd zlib iw) |
-| A Tera raid with a real Switch | 1. `..\start.ps1 room -Beacon` (the room in its own window with Violet's game id, the beacon here; log and pcap in `captures\<time>\`; stopping the beacon closes the room; separately: `..\start.ps1 room`, then `..\start.ps1 beacon`) 2. `..\start.ps1 violet -NoBuild -Room 127.0.0.1:24872 -Nick Host`, host a raid with a link code, search for it on the Switch |
+| A Tera raid with a real Switch | 1. `..\start.ps1 room -Beacon` (both in this console: the room hidden with Violet's game id, the beacon in the foreground; their logs and the pcap in `captures\<time>\`; Ctrl+C stops both; separately: `..\start.ps1 room`, then `..\start.ps1 beacon`) 2. `..\start.ps1 violet -NoBuild -Room 127.0.0.1:24872 -Nick Host`, host a raid with a link code, search for it on the Switch |
 | Flash the S3's firmware | in `s3\`, after ESP-IDF's EIM profile (`. <IDF tools dir>\Microsoft.v5.5.6.PowerShell_profile.ps1`): `idf.py build`, `idf.py -p <port> flash` (stop ldnbeacon first: it holds the port) |
 | S3 bench without a Switch | `build\s3test [--ap] [--tx]` |
 | Check a capture / a log's Pia packets | `build\advdump <pcap>`, `build\piatest ...` (Layout below) |
