@@ -163,6 +163,15 @@ response fails its check (the 4-byte flags at 0x34 were a guess: the request's 2
 entry in the advertisement should have been there within ~100 ms). Next run: the flags change per join attempt
 (2, 1, 0, 3; `--resp-flags` fixes one), the log says which attempt used which and how long the Switch stayed, and
 logs the advertised participant list on every change.
+Run 9 (`captures/20261106-beacon-run9/`): three joins with response flags 2, 1, 0: each time the room host took the
+Switch (node 1, 169.254.X.2, advertised with its MAC and platform 1 right away) and each time the Switch
+deauthenticated (reason 3) 510-512 ms after our response. The flags make no difference; a fixed ~510 ms is a
+timeout: it waits for something after the response, most likely to see itself in the advertisement. Our
+advertisement's nonce never changed within a session (a Switch host's also stays the same while nothing changes), so
+a station skipping advertisements by nonce would never see the update: the nonce now changes with the content
+(flags back to 2, `--resp-flags` still there). (Reading these logs: hostapd's debug lines interleave with ours, so
+grep without anchoring at line start.) The user's second Switch (for a real host + station capture, RUN.txt block 4)
+was out of charge.
 If the Switch lists nothing: it may scan actively (probe requests in the log; answer them), or the card may refuse
 injection on mon0 (status line: frames sent / failed).
 

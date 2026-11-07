@@ -49,7 +49,7 @@ static unsigned cnt_decrypted, cnt_undecryptable, cnt_auth_answered, cnt_other_d
 /* the challenge response's flags (ldnauth.h): fixed with --resp-flags, else a new value per join attempt from this
  * list, to find the one a Switch accepts in one run */
 static const u32 resp_flag_tries[] = {2, 1, 0, 3};
-static int resp_flags_fixed = -1, attempt;
+static int resp_flags_fixed = 2, attempt;          /* run 9: 2, 1 and 0 all ended the same way */
 static u32 attempt_flags;
 static u64 answered_ms;
 
@@ -457,6 +457,23 @@ int main(int argc, char **argv) {
                             memcpy(a.participants[i].mac, sta.mac, 6);
                             a.participants[i].platform = sta.platform;
                         }
+                /* a new nonce whenever the content changes: a station may skip advertisements whose nonce it has
+                 * already seen (run 9: the Switch left 510 ms after joining, as if it never saw itself listed) */
+                {
+                    static LdnAdvert last_adv;
+                    static bool have_last;
+                    LdnAdvert cmp = a;
+                    cmp.nonce = 0;
+                    if (!have_last || memcmp(&cmp, &last_adv, sizeof cmp)) {
+                        if (have_last) {
+                            random_bytes(&net.session.nonce, 4);
+                            logf_(1, "advertisement changed: new nonce %08x", net.session.nonce);
+                        }
+                        last_adv = cmp;
+                        have_last = true;
+                    }
+                    a.nonce = net.session.nonce;
+                }
                 /* the participant list as advertised, logged when it changes */
                 static u8 last_list[ADV_PARTICIPANTS * 12 + 1];
                 u8 list[ADV_PARTICIPANTS * 12 + 1];
