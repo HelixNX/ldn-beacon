@@ -17,5 +17,7 @@ bool ldn_keys_load(LdnKeys *k, const char *const *files, int nfiles, const char 
 
 /* key = dec(kek, first 16 bytes of SHA-256(input)) */
 void ldn_derive(const u8 kek[16], const void *input, size_t n, u8 key[16]);
+/* the network's data key: derived from the server random + the game's passphrase (needs the passphrase loaded) */
+void ldn_data_key(const LdnKeys *k, const u8 server_random[16], u8 key[16]);
 
 #endif

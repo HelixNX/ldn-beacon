@@ -4,14 +4,19 @@
  * that concerns us (probe requests, authentication / association to our BSSID, other consoles' advertisements) is
  * logged, as a preview of stage 2.
  *   sudo ./ldnbeacon --room host[:port] [--iface wlan0] [--channel 1|6|11] [--nick name] [--password pw]
- *                    [-k keyfile]... [--pcap file] [--log 0-2]
+ *                    [-k keyfile]... [--pcap file] [--no-ap] [--psk-mode 0-2] [--hostapd-log file] [--log 0-2]
+ * Stage 2 (default): hostapd runs the network on the Wi-Fi interface (ACKs, authentication, association, WPA2; see
+ * ap.h) and mon0 only injects the advertisements; --no-ap is stage 1 (beacons and probe responses injected too).
+ * The WPA2 key is a guess (--psk-mode, ap.h); hostapd's debug log and --pcap capture the handshake either way.
  * --pcap saves every frame heard (radiotap, for Wireshark / analysis elsewhere).
  * Key files default to ../keys/prod.keys and ../keys/ldn.txt (run from ldn-beacon/). Ctrl+C gives Wi-Fi back. */
+#include "ap.h"
 #include "frames.h"
 #include "radio.h"
 #include "room.h"
 #include <signal.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 static volatile sig_atomic_t quit;
 static void on_signal(int s) { (void)s; quit = 1; }
@@ -60,6 +65,8 @@ static unsigned cnt_probe_ours, cnt_probe_resp;
 /* the air side's state, for answering probes from on_frame */
 static Radio radio;
 static u8 channel_now;
+static bool use_ap = true;
+static unsigned cnt_eapol, cnt_protected;
 static u16 seq;
 static u64 start_us;
 
@@ -83,6 +90,18 @@ static void on_frame(const u8 *f, size_t n, const u8 bssid[6]) {
         else if (f[0] == 0xD0) cnt_echo_adv++;
         return;
     }
+    if (type == 2 && !memcmp(a1, bssid, 6)) {               /* data to us */
+        if (f[1] & 0x40) {                                  /* protected: the WPA2 key works */
+            if (!cnt_protected++) logf_(0, "air: encrypted data from " MAC_FMT ": the WPA2 handshake worked", MAC_ARG(a2));
+            return;
+        }
+        size_t h = (sub & 8) ? 26 : 24;                     /* QoS data has 2 more bytes */
+        if (n >= h + 8 && f[h] == 0xAA && f[h + 1] == 0xAA && f[h + 6] == 0x88 && f[h + 7] == 0x8E) {
+            cnt_eapol++;
+            logf_(0, "air: EAPOL (WPA2 handshake) from " MAC_FMT ", %zu bytes", MAC_ARG(a2), n);
+        }
+        return;
+    }
     if (type != 0) return;                                  /* management only */
     if (sub == 4) {                                         /* probe request */
         cnt_probe++;
@@ -92,6 +111,11 @@ static void on_frame(const u8 *f, size_t n, const u8 bssid[6]) {
             host_ssid(&net.session, ssid);
             if (!memcmp(f + 26, ssid, 32)) {
                 cnt_probe_ours++;
+                if (use_ap) {                               /* hostapd answers */
+                    if (first_time(seen_ours, &nseen_ours, a2))
+                        logf_(0, "air: " MAC_FMT " asks for our network by name (hostapd answers)", MAC_ARG(a2));
+                    return;
+                }
                 u8 fr[FRAME_MAX];
                 size_t k = frame_probe_resp(fr, sizeof fr, &net.session, bssid, a2, seq++ & 0xFFF,
                                             now_us() - start_us, channel_now);
@@ -122,8 +146,9 @@ static void on_frame(const u8 *f, size_t n, const u8 bssid[6]) {
     } else if ((sub == 11 || sub == 0 || sub == 2) && !memcmp(a1, bssid, 6)) {
         /* authentication / (re)association request to us: stage 2's start */
         if (sub == 11) cnt_auth++; else cnt_assoc++;
-        logf_(0, "air: %s from " MAC_FMT " to us (%zu bytes): the Switch tries to join (not handled yet)",
-              sub == 11 ? "authentication" : "association request", MAC_ARG(a2), n);
+        if (!use_ap || cnt_auth + cnt_assoc <= 20)
+            logf_(0, "air: %s from " MAC_FMT " to us (%zu bytes)%s", sub == 11 ? "authentication" : "association request",
+                  MAC_ARG(a2), n, use_ap ? " (hostapd answers)" : ": the Switch tries to join (not handled yet)");
     } else if (sub == 13 && n >= 24 + 6 && f[24] == 0x7F && f[25] == 0x00 && f[26] == 0x22 && f[27] == 0xAA) {
         cnt_adv_other++;
         if (first_time(seen_adv, &nseen_adv, a2))
@@ -137,7 +162,8 @@ int main(int argc, char **argv) {
     RoomConfig c = {.port = 24872, .nick = "beacon", .game_name = "Pokemon Violet", .game_id = 0x01008F6008C5E000ull};
     char host[256] = "";
     const char *iface = NULL, *keyfiles[8];
-    const char *pcap_path = NULL;
+    const char *pcap_path = NULL, *hostapd_log = "hostapd.log", *passphrase = "ldn_passphrase_scarlet_violet";
+    int psk_mode = AP_PSK_HEX_PASSPHRASE;
     int nkeys = 0, channel = 6;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
@@ -153,9 +179,13 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-k") && v && nkeys < 8) keyfiles[nkeys++] = v, i++;
         else if (!strcmp(a, "--log") && v) log_level = atoi(v), i++;
         else if (!strcmp(a, "--pcap") && v) pcap_path = v, i++;
+        else if (!strcmp(a, "--no-ap")) use_ap = false;
+        else if (!strcmp(a, "--psk-mode") && v) psk_mode = atoi(v), i++;
+        else if (!strcmp(a, "--hostapd-log") && v) hostapd_log = v, i++;
+        else if (!strcmp(a, "--passphrase") && v) passphrase = v, i++;
         else {
             fprintf(stderr, "usage: sudo ./ldnbeacon --room host[:port] [--iface wlan0] [--channel 1|6|11] "
-                            "[--nick name] [--password pw] [-k keyfile]... [--pcap file] [--log 0-2]\n");
+                            "[--nick name] [--password pw] [-k keyfile]... [--pcap file] [--no-ap] [--psk-mode 0-2] [--hostapd-log file] [--log 0-2]\n");
             return 2;
         }
     }
@@ -163,7 +193,8 @@ int main(int argc, char **argv) {
     if (channel != 1 && channel != 6 && channel != 11) { fprintf(stderr, "ldnbeacon: channel 1, 6 or 11\n"); return 2; }
     if (!nkeys) { keyfiles[0] = "../keys/prod.keys"; keyfiles[1] = "../keys/ldn.txt"; nkeys = 2; }
     LdnKeys keys;
-    if (!ldn_keys_load(&keys, keyfiles, nkeys, NULL)) return 1;
+    if (psk_mode < 0 || psk_mode >= AP_PSK_MODES) { fprintf(stderr, "ldnbeacon: --psk-mode 0-%d\n", AP_PSK_MODES - 1); return 2; }
+    if (!ldn_keys_load(&keys, keyfiles, nkeys, use_ap ? passphrase : NULL)) return 1;
     c.host = host;
 
     signal(SIGINT, on_signal);
@@ -179,6 +210,11 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    int ldn_fd = use_ap ? radio_eth_socket(&radio, 0x88B7) : -1;   /* the LDN authentication, after WPA2 */
+    if (use_ap && ldn_fd < 0) logf_(0, "ldnbeacon: no packet socket for EtherType 0x88B7");
+    Ap ap = {0};
+    u8 ap_session[16] = {0};
+    bool ap_tried = false;
     FILE *pcap = NULL;
     if (pcap_path) {
         pcap = fopen(pcap_path, "wb");
@@ -212,6 +248,18 @@ int main(int argc, char **argv) {
             }
         }
 
+        if (ldn_fd >= 0) {
+            static u8 eth[2048];
+            size_t k;
+            while ((k = radio_eth_recv(ldn_fd, eth, sizeof eth))) {
+                char hx[2 * 128 + 1];
+                size_t m = k < 128 ? k : 128;
+                for (size_t i = 0; i < m; i++) snprintf(hx + 2 * i, 3, "%02x", eth[i]);
+                logf_(0, "ap: LDN frame (EtherType 0x88B7), %zu bytes, from " MAC_FMT ": %s%s", k, MAC_ARG(eth + 6), hx,
+                      k > m ? "..." : "");
+            }
+        }
+
         t = now_ms();
         if (t - last_scan >= 1000) {                        /* ask the room who hosts */
             last_scan = t;
@@ -225,7 +273,26 @@ int main(int argc, char **argv) {
         }
         if (net.have != on_air) {
             on_air = net.have;
-            if (on_air) logf_(0, "on the air: beacon + advertisement every 100 ms on channel %d", channel);
+            if (on_air) logf_(0, "on the air: %s every 100 ms on channel %d", use_ap ? "advertisement (beacons: hostapd)" :
+                              "beacon + advertisement", channel);
+        }
+        if (use_ap) {                                       /* one hostapd per room session */
+            bool same = net.have && !memcmp(ap_session, net.session.session_id, 16);
+            if (ap.pid > 0 && (!net.have || !same)) ap_stop(&ap);
+            if (ap.pid > 0) ap_running(&ap);                /* exited: logged; not retried for this session */
+            if (net.have && !same) {
+                memcpy(ap_session, net.session.session_id, 16);
+                ap_tried = false;
+            }
+            if (net.have && ap.pid <= 0 && !ap_tried) {
+                ap_tried = true;
+                char ssid[33];
+                u8 key[16];
+                host_ssid(&net.session, ssid);
+                ldn_data_key(&keys, net.session.server_random, key);
+                if (!ap_start(&ap, radio.iface, ssid, (u8)channel, key, psk_mode, hostapd_log, err, sizeof err))
+                    logf_(0, "ldnbeacon: %s", err);
+            }
         }
         if (t >= next_tick) {
             next_tick += 100;
@@ -233,8 +300,11 @@ int main(int argc, char **argv) {
             if (net.have) {
                 LdnAdvert a;
                 host_advert(&net.session, &net.info, radio.mac, (u8)channel, &a);
-                size_t k = frame_beacon(fr, sizeof fr, radio.mac, seq++ & 0xFFF, now_us() - start_us, (u8)channel);
-                if (k && radio_send(&radio, fr, k)) sent++; else send_fail++;
+                size_t k;
+                if (!use_ap) {
+                    k = frame_beacon(fr, sizeof fr, radio.mac, seq++ & 0xFFF, now_us() - start_us, (u8)channel);
+                    if (k && radio_send(&radio, fr, k)) sent++; else send_fail++;
+                }
                 k = frame_advert(fr, sizeof fr, &keys, &a, radio.mac, seq++ & 0xFFF);
                 if (k && radio_send(&radio, fr, k)) sent++; else send_fail++;
             }
@@ -243,14 +313,16 @@ int main(int argc, char **argv) {
             last_status = t;
             logf_(1, "status: %s, %u frames sent (%u failed; reported back by the driver: %u beacons, %u advertisements); heard %u frames: "
                      "%u probe requests (%u from consoles, %u for our network, %u answered), %u authentications "
-                     "and %u association requests to us, %u Nintendo action frames from others",
+                     "and %u association requests to us, %u EAPOL and %u encrypted data frames to us, %u Nintendo action frames from others",
                   on_air ? "on the air" : "no network in the room yet", sent, send_fail, cnt_echo_beacon, cnt_echo_adv, cnt_rx, cnt_probe, cnt_probe_nn, cnt_probe_ours, cnt_probe_resp, cnt_auth,
-                  cnt_assoc, cnt_adv_other);
+                  cnt_assoc, cnt_eapol, cnt_protected, cnt_adv_other);
             if (send_fail && !sent) logf_(0, "ldnbeacon: the card sends nothing (injection refused?)");
             if (pcap) fflush(pcap);
         }
     }
     if (pcap) fclose(pcap);
+    ap_stop(&ap);
+    if (ldn_fd >= 0) close(ldn_fd);
     radio_close(&radio);
     room_leave();
     return rc;

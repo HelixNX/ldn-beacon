@@ -22,5 +22,10 @@ void radio_close(Radio *r);
 bool radio_send(Radio *r, const u8 *frame, size_t n);
 /* the next received frame without its radiotap header, or 0 when none is waiting (non-blocking) */
 size_t radio_recv(Radio *r, u8 *buf, size_t cap, const u8 **frame);
+/* a non-blocking packet socket for one EtherType on the Wi-Fi interface (the AP's side: whole Ethernet frames,
+ * decrypted); -1 on error */
+int radio_eth_socket(const Radio *r, u16 ethertype);
+/* the next frame on such a socket, 0 when none */
+size_t radio_eth_recv(int fd, u8 *buf, size_t cap);
 
 #endif

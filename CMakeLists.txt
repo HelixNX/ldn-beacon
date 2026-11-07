@@ -50,7 +50,7 @@ target_link_libraries(roomtest PRIVATE room)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     # the beacon itself: a monitor interface and raw 802.11 frames (radio.c)
-    add_executable(ldnbeacon src/ldnbeacon.c src/radio.c)
+    add_executable(ldnbeacon src/ldnbeacon.c src/radio.c src/ap.c)
     target_link_libraries(ldnbeacon PRIVATE room)
 endif()
 

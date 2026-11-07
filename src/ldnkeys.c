@@ -77,3 +77,11 @@ void ldn_derive(const u8 kek[16], const void *input, size_t n, u8 key[16]) {
     sha256(input, n, h);
     aes128_ecb_decrypt1(kek, h, key);
 }
+
+void ldn_data_key(const LdnKeys *k, const u8 server_random[16], u8 key[16]) {
+    u8 in[16 + sizeof k->passphrase];
+    size_t n = strlen(k->passphrase);
+    memcpy(in, server_random, 16);
+    memcpy(in + 16, k->passphrase, n);
+    ldn_derive(k->data_kek, in, 16 + n, key);
+}

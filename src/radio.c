@@ -131,7 +131,11 @@ void radio_close(Radio *r) {
     r->fd = -1;
     if (r->mon_added) run("iw dev %s del 2>/dev/null", r->mon);
     r->mon_added = false;
-    if (r->iface[0]) run("ip link set %s up 2>/dev/null", r->iface);
+    if (r->iface[0]) {                                      /* hostapd may have left it in AP mode */
+        run("ip link set %s down 2>/dev/null", r->iface);
+        run("iw dev %s set type managed 2>/dev/null", r->iface);
+        run("ip link set %s up 2>/dev/null", r->iface);
+    }
     char *save, *s = strtok_r(r->stopped, " ", &save);
     for (; s; s = strtok_r(NULL, " ", &save)) run("systemctl start %s", s);
     r->stopped[0] = 0;
@@ -147,6 +151,23 @@ bool radio_send(Radio *r, const u8 *frame, size_t n) {
     memcpy(buf + sizeof rt, frame, n);
     ssize_t k = send(r->fd, buf, n + sizeof rt, 0);
     return k == (ssize_t)(n + sizeof rt);
+}
+
+int radio_eth_socket(const Radio *r, u16 ethertype) {
+    int fd = socket(AF_PACKET, SOCK_RAW, htons(ethertype));
+    if (fd < 0) return -1;
+    struct sockaddr_ll sll = {0};
+    sll.sll_family = AF_PACKET;
+    sll.sll_protocol = htons(ethertype);
+    sll.sll_ifindex = (int)if_nametoindex(r->iface);
+    if (!sll.sll_ifindex || bind(fd, (struct sockaddr *)&sll, sizeof sll) < 0) { close(fd); return -1; }
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+    return fd;
+}
+
+size_t radio_eth_recv(int fd, u8 *buf, size_t cap) {
+    ssize_t k = recv(fd, buf, cap, 0);
+    return k > 0 ? (size_t)k : 0;
 }
 
 size_t radio_recv(Radio *r, u8 *buf, size_t cap, const u8 **frame) {
