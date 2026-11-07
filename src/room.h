@@ -1,5 +1,5 @@
 /* The room client: one ENet peer, the room server (the protocol Citra, yuzu and Eden rooms speak, network
- * version 1; nxrecomp's tools/room/room_server.c is ours). Single-threaded: the caller runs room_service() in its
+ * version 1; ../room/room_server.c is ours). Single-threaded: the caller runs room_service() in its
  * own loop, and the handlers run inside it.
  * Encoding: every message is an ENet reliable packet on channel 0, type byte first; integers big-endian, strings and
  * vectors with a u32 length in front, IPv4 addresses 4 raw bytes. Members get fake addresses (192.168.1.x); LDN and
