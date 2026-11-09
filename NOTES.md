@@ -10,7 +10,8 @@ longer `nxrecomp/tools/room` or `../pokemon-violet/build/room/`; build.bat finds
 
 ## Protocol (kinnay's NintendoClients wiki: LDN-Protocol, LDN-Passphrases, Local-Wireless-Communication-on-PC; kinnay/LDN README; read 2026-11-06; behaviour only)
 
-Constants (input keys, the challenge HMAC key, Scarlet / Violet's passphrase and Pia game key) are in `../keys/ldn.txt`, not here.
+Constants (input keys, the challenge HMAC key, Scarlet / Violet's passphrase and Pia game key) are read from the user's
+firmware and game at run time (since 2026-11-09; before, a hand-made `../keys/ldn.txt`), never here.
 Big-endian unless stated.
 - **Advertisement** (vendor action frame to broadcast, every 100 ms): 7f, OUI 00 22 aa, protocol id 4, pad, packet
   type 0x0101, 2 zero, 2 pad; then the payload: session info (32: u64 local communication id, 2 pad, u16 game mode,
@@ -188,7 +189,7 @@ Pia re-addressing (2026-11-07; the user chose it over changing the recomp): `src
 all 28 host packets authenticate** with session key = AES-encrypt(game key, the session id's 16 raw bytes) (the
 recomp's Pia reads the session id, not Eden's SSID string: so the key is the same on the air), nonce prefix =
 CRC-32(session id[1..15]) XOR the source IPv4, both big-endian, no AAD; re-encrypting gives the packet back. The game
-key is `pia_game_key_scarlet_violet` in `../keys/ldn.txt` (kinnay's Pia-Game-Keys). ldnbeacon decrypts each Pia
+key is the game's Pia key, read from its `main` (kinnay's Pia-Game-Keys). ldnbeacon decrypts each Pia
 packet with the sender's address on its side and encrypts it with the address the receiver sees (room -> air: the
 node's 169.254.X.(i+1); air -> room: our room address) and logs the first few and the counts. The host's first packet
 is a Net (0x2C) message. Still possible after this: Pia's LDN constant id comes from the MAC (Pia-Types), and the MACs
@@ -241,7 +242,8 @@ code and searches for it on the Switch. Firmware: in `s3/`, after the EIM profil
 (`. <IDF tools dir>\Microsoft.v5.5.6.PowerShell_profile.ps1`), `idf.py build` and `idf.py -p <port> flash` (stop
 ldnbeacon first: it holds the port). Bench without a Switch: `build/s3test [--ap] [--tx]`.
 Laptop runs (fallback): `RUN.txt` at the stick's root: unzip with -DD, clean build, then ldnbeacon; results to the
-stick; saved here as `captures/<date>-beacon-runN/`. The zip carries `../keys/prod.keys` and `ldn.txt`.
+stick; saved here as `captures/<date>-beacon-runN/`. The zip carried `../keys/prod.keys` and `ldn.txt`;
+since 2026-11-09 a laptop run also needs the firmware NCAs and the game's NSPs on the stick (`--files`).
 
 ## Language (open question, for later)
 
@@ -426,3 +428,14 @@ network: there the ids still differ.
 tried yet: a trade.
 Open now: several Switches; the Switch hosting with the room joining (design item 2: ldnjoin
 is its first half); nxrecomp's CreateNetwork without a random security parameter.
+
+## 2026-11-09: keys from the user's own firmware and game
+
+`ldn.txt` (constants copied by hand from kinnay's wiki) is gone: the beacon reads them where Nintendo put them, so it
+runs only with a dumped console's firmware and game. Found in firmware 22.5.0: the advertisement and data input keys
+in `ldn` (0100000000000018) .rodata, the challenge HMAC key in `es` (0100000000000033) .rodata (not in `ldn`, and at
+an unaligned offset); Scarlet / Violet's passphrase (64 characters) and Pia key (16) as NUL-terminated strings in
+Violet 4.0.0's `main` .rodata. ldnkeys.c holds only SHA-256 hashes and scans every window (binary keys) or every
+printable string of the length (the game's). Checked: every derived key and constant equal to ldn.txt's; advdump
+decodes all 278 advertisements of `captures/20261107-032045-vif/ch11.pcap`. If a later firmware moves a constant to
+another module, add the module's program id to `fw_programs`.

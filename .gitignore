@@ -2,3 +2,6 @@ build/
 captures/
 radio-check/
 *.pcap
+*.pcapng
+*.log
+*.bin

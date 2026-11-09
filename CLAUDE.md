@@ -5,7 +5,7 @@ protocol Citra, yuzu and Eden rooms speak (`../room`, ours). The desktop runs th
 next to the Switch is an ESP32-S3 on USB (or, on Linux, a Wi-Fi card with monitor + AP modes); the beacon joins the
 room as one member and forwards everything between the air and the room. To the room the Switch is one more
 member. Started 2026-11-06 for Pokemon Violet's Tera raids. Local git repo for now (no remote yet). Builds on its
-own (no sibling folders needed except `../keys` for the default key paths).
+own; runs only with the user's own files (below).
 
 Rules (the workspace's, `../CLAUDE.md`): nothing derived from a game or a console goes in this repo (keys stay in
 `../keys/`, captures in `captures/`, git-ignored). kinnay's LDN documentation and library, Eden's sources and
@@ -23,8 +23,13 @@ Ryujinx are for behaviour only: our own implementation. **The protocol, the radi
 | S3 bench without a Switch | `build\s3test [--ap] [--tx]` |
 | Check a capture / a log's Pia packets | `build\advdump <pcap>`, `build\piatest ...` (Layout below) |
 
-Keys: `../keys/prod.keys` and `../keys/ldn.txt` by default; `-k <file>` (repeatable) on every tool. Stop the
-beacon only when the user says the raid / session is over.
+Keys: nothing of Nintendo's is in the repo. Every tool reads the user's own files (`src/ldnkeys.c`, `src/nxfs.c`):
+`prod.keys` (+ `title.keys`), the firmware's NCAs (the LDN input keys are in its `ldn` module, the challenge HMAC key
+in `es`) and, for ldnbeacon / ldnjoin, the game's NSPs (its passphrase and Pia key are in its `main`); each constant
+is recognised by its SHA-256. `--files <dir>` (repeatable) on every tool: searched for the keys, NSPs, and NCAs in it,
+its subfolders and `firmware/` (so a game's package folder works as is); default `.`, `../keys`, `../firmware`,
+`../pkmn-violet/rom`, and `~/.switch` for keys. Loading takes ~4 s (scanning the game's code). `--game
+scarlet_violet` (ldnbeacon; the only one so far). Stop the beacon only when the user says the raid / session is over.
 ## Layout
 
 | Path | What |
@@ -33,7 +38,8 @@ beacon only when the user says the raid / session is over.
 | `src/ldn.h` | LDN structures as the room carries them (NetworkInfo 0x480, NodeInfo 0x40; as nxrecomp's `ldn_net.c`) |
 | `src/rd.h` | bounds-checked byte reader / writer: every parse of a frame from the air goes through it |
 | `src/crypto.c` | AES-128 (block, CTR) and SHA-256, our own (no crypto library needed) |
-| `src/ldnkeys.c` | loads `prod.keys` + `ldn.txt` at run time, derives the advertisement / data keks |
+| `src/ldnkeys.c` | finds the LDN constants in the user's firmware and game by their SHA-256 (only the hashes are in the source), derives the advertisement / data keks |
+| `src/nxfs.c` | the user's NSPs and firmware NCAs read in place (NCA3 header XTS, section CTR, PFS0, NSO LZ4), portable; as nxrecomp's `runtime/nca.c` |
 | `src/adv.c` | advertisement decode / encode (CTR, hash check) and to / from a room NetworkInfo |
 | `src/advdump.c` | decrypts the advertisements in a pcap (radiotap or bare 802.11), prints them, checks re-encoding; any OS |
 | `src/frames.c` | stage 1: the beacon (a Switch's elements) and advertisement for a room network, with the values a console makes up (server random, auth token, nonce, 169.254.X subnet) |
@@ -88,6 +94,7 @@ beacon's room address; each remote member's room address <-> a 169.254.X.Y on th
 
 ## Open
 
+- The Linux Wi-Fi card route (`--radio wifi`, hostapd) is parked: the user moved to the S3, which works on any OS (2026-11-09).
 - Several Switches at once (one room member each; the S3's AP takes up to 8).
 - The Switch hosting with the room joining (design item 2; `ldnjoin` is its first half).
 - nxrecomp's CreateNetwork should make a random security parameter, as a console does.

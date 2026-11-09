@@ -1,16 +1,16 @@
 /* authtest: parses decrypted LDN authentication requests (files from ccmptest -d: LLC/SNAP header + LDN frame),
  * builds the response the beacon would send, wraps it in a CCMP data frame and decrypts it again.
- *   authtest [-k keyfile]... [--data-key hex] [--out file] request.bin... */
+ *   authtest [--files dir]... [--data-key hex] [--out file] request.bin... */
 #include "ccmp.h"
 #include "ldnauth.h"
 #include <stdlib.h>
 
 int main(int argc, char **argv) {
-    const char *keyfiles[8], *outp = NULL;
-    int nkeys = 0, bad = 0;
+    const char *dirs[8], *outp = NULL;
+    int ndirs = 0, bad = 0;
     u8 dkey[16] = {0};
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "-k") && i + 1 < argc && nkeys < 8) { keyfiles[nkeys++] = argv[++i]; continue; }
+        if (!strcmp(argv[i], "--files") && i + 1 < argc && ndirs < 8) { dirs[ndirs++] = argv[++i]; continue; }
         if (!strcmp(argv[i], "--out") && i + 1 < argc) { outp = argv[++i]; continue; }
         if (!strcmp(argv[i], "--data-key") && i + 1 < argc) {
             const char *h = argv[++i];
@@ -18,12 +18,11 @@ int main(int argc, char **argv) {
             continue;
         }
     }
-    if (!nkeys) { keyfiles[0] = "../keys/prod.keys"; keyfiles[1] = "../keys/ldn.txt"; nkeys = 2; }
     LdnKeys keys;
-    if (!ldn_keys_load(&keys, keyfiles, nkeys, NULL)) return 1;
+    if (!ldn_keys_load(&keys, dirs, ndirs, NULL)) return 1;
     static const u8 own_id[8] = {1, 2, 3, 4, 5, 6, 7, 8};
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "-k") || !strcmp(argv[i], "--out") || !strcmp(argv[i], "--data-key")) { i++; continue; }
+        if (!strcmp(argv[i], "--files") || !strcmp(argv[i], "--out") || !strcmp(argv[i], "--data-key")) { i++; continue; }
         FILE *f = fopen(argv[i], "rb");
         if (!f) { fprintf(stderr, "cannot open %s\n", argv[i]); return 1; }
         static u8 b[4096];

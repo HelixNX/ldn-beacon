@@ -4,7 +4,7 @@
  * that concerns us (probe requests, authentication / association to our BSSID, other consoles' advertisements) is
  * logged, as a preview of stage 2.
  *   ldnbeacon --room host[:port] [--radio s3[:port] | wifi[:iface]] [--channel 1|6|11] [--nick name]
- *                    [--password pw] [-k keyfile]... [--pcap file] [--no-ap] [--psk-mode 0-2] [--hostapd-log file]
+ *                    [--password pw] [--files dir]... [--pcap file] [--no-ap] [--psk-mode 0-2] [--hostapd-log file]
  *                    [--s3-open] [--resp-flags n] [--bcast-mode 0-2] [--log 0-2]
  * The radio (radio.h): s3, an ESP32-S3 with s3/ flashed on USB (Windows and Linux; its SoftAP takes hostapd's part,
  * --s3-open makes it an open AP instead of WPA2), or wifi, the machine's own card (Linux only: mon0 + hostapd).
@@ -13,7 +13,8 @@
  * ap.h) and mon0 only injects the advertisements; --no-ap is stage 1 (beacons and probe responses injected too).
  * The WPA2 key is a guess (--psk-mode, ap.h); hostapd's debug log and --pcap capture the handshake either way.
  * --pcap saves every frame heard (radiotap, for Wireshark / analysis elsewhere).
- * Key files default to ../keys/prod.keys and ../keys/ldn.txt (run from ldn-beacon/). Ctrl+C gives Wi-Fi back. */
+ * Keys from your own prod.keys, firmware and game (ldnkeys.h; --files dir, default: ldn-beacon/ and the workspace;
+ * --game scarlet_violet). Ctrl+C gives Wi-Fi back. */
 #include "bridge.h"
 #include "ccmp.h"
 #include "frames.h"
@@ -91,7 +92,7 @@ static void on_ldn(const RoomLdn *p, void *ud) {
         ldn_data_key(&keys, net.session.server_random, net.data_key);
         net.have_pia = keys.have_pia_key;
         if (net.have_pia) pia_net_init(&net.pia, keys.pia_game_key, net.session.session_id, &pia_variant);
-        else logf_(0, "network: no Pia game key (pia_game_key_* in ldn.txt): Pia packets pass unchanged and fail");
+        else logf_(0, "network: no Pia game key: Pia packets pass unchanged and fail");
         static const u8 zero16[16];
         char sr[33];
         for (int i = 0; i < 16; i++) snprintf(sr + 2 * i, 3, "%02x", net.session.server_random[i]);
@@ -620,12 +621,12 @@ static void on_station(const u8 mac[6], bool joined, u16 reason) {
 int main(int argc, char **argv) {
     RoomConfig c = {.port = 24872, .nick = "beacon", .game_name = "Pokemon Violet", .game_id = 0x01008F6008C5E000ull};
     char host[256] = "";
-    const char *radio_spec = NULL, *keyfiles[8];
+    const char *radio_spec = NULL, *dirs[8];
     char iface_spec[48];
     bool s3_open = false;
-    const char *pcap_path = NULL, *hostapd_log = "hostapd.log", *passphrase = "ldn_passphrase_scarlet_violet";
+    const char *pcap_path = NULL, *hostapd_log = "hostapd.log", *game = "scarlet_violet";
     int psk_mode = AP_PSK_HEX_PASSPHRASE;
-    int nkeys = 0, channel = 6;
+    int ndirs = 0, channel = 6;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
         if (!strcmp(a, "--room") && v) {
@@ -642,18 +643,18 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--channel") && v) channel = atoi(v), i++;
         else if (!strcmp(a, "--nick") && v) c.nick = v, i++;
         else if (!strcmp(a, "--password") && v) c.password = v, i++;
-        else if (!strcmp(a, "-k") && v && nkeys < 8) keyfiles[nkeys++] = v, i++;
+        else if (!strcmp(a, "--files") && v && ndirs < 8) dirs[ndirs++] = v, i++;
         else if (!strcmp(a, "--log") && v) log_level = atoi(v), i++;
         else if (!strcmp(a, "--pcap") && v) pcap_path = v, i++;
         else if (!strcmp(a, "--no-ap")) use_ap = false;
         else if (!strcmp(a, "--psk-mode") && v) psk_mode = atoi(v), i++;
         else if (!strcmp(a, "--hostapd-log") && v) hostapd_log = v, i++;
-        else if (!strcmp(a, "--passphrase") && v) passphrase = v, i++;
+        else if (!strcmp(a, "--game") && v) game = v, i++;
         else if (!strcmp(a, "--resp-flags") && v) resp_flags_fixed = atoi(v), i++;
         else if (!strcmp(a, "--bcast-mode") && v) bcast_mode = atoi(v), i++;
         else {
             fprintf(stderr, "usage: ldnbeacon --room host[:port] [--radio s3[:port] | wifi[:iface]] [--channel 1|6|11] "
-                            "[--nick name] [--password pw] [-k keyfile]... [--pcap file] [--no-ap] [--psk-mode 0-2] [--hostapd-log file]\n"
+                            "[--nick name] [--password pw] [--files dir]... [--pcap file] [--no-ap] [--psk-mode 0-2] [--hostapd-log file]\n"
                             "       [--s3-open] [--resp-flags n] [--bcast-mode 0-2] [--log 0-2]\n");
             return 2;
         }
@@ -664,14 +665,13 @@ int main(int argc, char **argv) {
     logf_(0, "ldnbeacon: stage 3 (room <-> air bridge, broadcast mode %d, ARP probes, high PN, the host's security parameter, Pia re-addressed, Pia messages rewritten), compiled " __DATE__
              " " __TIME__, bcast_mode);
     if (channel != 1 && channel != 6 && channel != 11) { fprintf(stderr, "ldnbeacon: channel 1, 6 or 11\n"); return 2; }
-    if (!nkeys) { keyfiles[0] = "../keys/prod.keys"; keyfiles[1] = "../keys/ldn.txt"; nkeys = 2; }
     random_bytes(own_device_id, sizeof own_device_id);
     /* our CCMP packet numbers start above any the Switch uses (it starts each join at a random 48-bit value, e.g.
      * 0x2e06668ad953, 0xeb78780e228a): a receiver with one replay counter per key would drop lower ones */
     random_bytes(&tx_pn, 4);
     tx_pn = 0xF00000000000ull | (tx_pn & 0xFFFFFFFFull);
     if (psk_mode < 0 || psk_mode >= AP_PSK_MODES) { fprintf(stderr, "ldnbeacon: --psk-mode 0-%d\n", AP_PSK_MODES - 1); return 2; }
-    if (!ldn_keys_load(&keys, keyfiles, nkeys, use_ap ? passphrase : NULL)) return 1;
+    if (!ldn_keys_load(&keys, dirs, ndirs, use_ap ? game : NULL)) return 1;
     c.host = host;
 
     signal(SIGINT, on_signal);

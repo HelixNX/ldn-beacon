@@ -38,7 +38,7 @@ else()
 endif()
 
 # LDN itself (crypto, keys, the advertisement, Pia; zlib for Pia's compressed messages), no network libraries
-add_library(ldncore STATIC src/common.c src/crypto.c src/ldnkeys.c src/adv.c src/frames.c src/ccmp.c src/ldnauth.c src/bridge.c src/pia.c)
+add_library(ldncore STATIC src/common.c src/crypto.c src/nxfs.c src/ldnkeys.c src/adv.c src/frames.c src/ccmp.c src/ldnauth.c src/bridge.c src/pia.c)
 target_include_directories(ldncore PUBLIC src "${ZLIB_INCLUDE}")
 target_link_libraries(ldncore PUBLIC "${ZLIB_LIB}")
 

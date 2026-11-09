@@ -1,6 +1,6 @@
 /* frametest: builds what the beacon would put on the air for a room network and writes it as a pcap, so it can be
  * checked without a radio (advdump decodes it, Wireshark shows the beacon).
- *   frametest [-k keyfile]... netinfo.bin out.pcap      (netinfo.bin: a raw NetworkInfo, from roomtest --dump) */
+ *   frametest [--files dir]... netinfo.bin out.pcap      (netinfo.bin: a raw NetworkInfo, from roomtest --dump) */
 #include "frames.h"
 #include <stdlib.h>
 
@@ -16,17 +16,16 @@ static void record(FILE *f, const u8 *p, size_t n, u32 t_ms) {
 }
 
 int main(int argc, char **argv) {
-    const char *keyfiles[8], *in = NULL, *out = NULL;
-    int nkeys = 0;
+    const char *dirs[8], *in = NULL, *out = NULL;
+    int ndirs = 0;
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "-k") && i + 1 < argc && nkeys < 8) keyfiles[nkeys++] = argv[++i];
+        if (!strcmp(argv[i], "--files") && i + 1 < argc && ndirs < 8) dirs[ndirs++] = argv[++i];
         else if (!in) in = argv[i];
         else if (!out) out = argv[i];
     }
-    if (!in || !out) { fprintf(stderr, "usage: frametest [-k keyfile]... netinfo.bin out.pcap\n"); return 2; }
-    if (!nkeys) { keyfiles[0] = "../keys/prod.keys"; keyfiles[1] = "../keys/ldn.txt"; nkeys = 2; }
+    if (!in || !out) { fprintf(stderr, "usage: frametest [--files dir]... netinfo.bin out.pcap\n"); return 2; }
     LdnKeys keys;
-    if (!ldn_keys_load(&keys, keyfiles, nkeys, NULL)) return 1;
+    if (!ldn_keys_load(&keys, dirs, ndirs, NULL)) return 1;
 
     LdnNetworkInfo n;
     FILE *f = fopen(in, "rb");

@@ -1,6 +1,6 @@
 /* advdump: decrypts the LDN advertisements in a capture and prints them as the room would see them (NetworkInfo).
- *   advdump [-k keyfile]... [-a] capture.pcap
- * Key files default to ../keys/prod.keys and ../keys/ldn.txt (run from ldn-beacon/). Reads pcap with radiotap
+ *   advdump [--files dir]... [-a] capture.pcap
+ * Keys from your own files (ldnkeys.h; --files, default: ldn-beacon/ and the workspace). Reads pcap with radiotap
  * (linktype 127) or bare 802.11 (105). Each distinct advertisement is printed once (-a: every one), and re-encoded
  * to check that adv_encode gives back the same bytes. */
 #include "adv.h"
@@ -38,20 +38,19 @@ static void print_advert(const LdnAdvert *a, const u8 src[6]) {
 }
 
 int main(int argc, char **argv) {
-    const char *keyfiles[8];
-    int nkeys = 0;
+    const char *dirs[8];
+    int ndirs = 0;
     bool all = false;
     const char *path = NULL;
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "-k") && i + 1 < argc && nkeys < 8) keyfiles[nkeys++] = argv[++i];
+        if (!strcmp(argv[i], "--files") && i + 1 < argc && ndirs < 8) dirs[ndirs++] = argv[++i];
         else if (!strcmp(argv[i], "-a")) all = true;
         else if (argv[i][0] != '-' && !path) path = argv[i];
-        else { fprintf(stderr, "usage: advdump [-k keyfile]... [-a] capture.pcap\n"); return 2; }
+        else { fprintf(stderr, "usage: advdump [--files dir]... [-a] capture.pcap\n"); return 2; }
     }
-    if (!path) { fprintf(stderr, "usage: advdump [-k keyfile]... [-a] capture.pcap\n"); return 2; }
-    if (!nkeys) { keyfiles[0] = "../keys/prod.keys"; keyfiles[1] = "../keys/ldn.txt"; nkeys = 2; }
+    if (!path) { fprintf(stderr, "usage: advdump [--files dir]... [-a] capture.pcap\n"); return 2; }
     LdnKeys keys;
-    if (!ldn_keys_load(&keys, keyfiles, nkeys, NULL)) return 1;
+    if (!ldn_keys_load(&keys, dirs, ndirs, NULL)) return 1;
 
     FILE *f = fopen(path, "rb");
     if (!f) { fprintf(stderr, "cannot open %s\n", path); return 1; }

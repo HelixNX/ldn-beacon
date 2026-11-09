@@ -5,7 +5,7 @@
  * every frame the host sends: IPv4 / UDP in full, and each Pia packet tried against the candidate key / nonce
  * derivations (the session id's raw bytes, its hex digits, the server random; every PiaVariant). Nothing is sent to
  * the game: the point is to read what a console sends to a new station.
- *   ldnjoin [--radio s3[:port]] [--channels 1,6,11] [--name text] [-k keyfile]... [--pcap file] [--token raw]
+ *   ldnjoin [--radio s3[:port]] [--channels 1,6,11] [--name text] [--files dir]... [--pcap file] [--token raw]
  * The token goes into the challenge reversed (as kinnay) unless --token raw; after a "bad challenge" status the next
  * attempt flips it. */
 #include "adv.h"
@@ -267,23 +267,22 @@ static void send_request(void) {
 }
 
 int main(int argc, char **argv) {
-    const char *spec = NULL, *keyfiles[8], *pcap_path = NULL, *chans = "6,1,11";
-    int nkeys = 0;
+    const char *spec = NULL, *dirs[8], *pcap_path = NULL, *chans = "6,1,11";
+    int ndirs = 0;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
         if (!strcmp(a, "--radio") && v) spec = v, i++;
         else if (!strcmp(a, "--channels") && v) chans = v, i++;
-        else if (!strcmp(a, "-k") && v && nkeys < 8) keyfiles[nkeys++] = v, i++;
+        else if (!strcmp(a, "--files") && v && ndirs < 8) dirs[ndirs++] = v, i++;
         else if (!strcmp(a, "--pcap") && v) pcap_path = v, i++;
         else if (!strcmp(a, "--token") && v) token_raw = !strcmp(v, "raw"), i++;
         else {
-            fprintf(stderr, "usage: ldnjoin [--radio s3[:port]] [--channels 6,1,11] [-k keyfile]... [--pcap file] "
+            fprintf(stderr, "usage: ldnjoin [--radio s3[:port]] [--channels 6,1,11] [--files dir]... [--pcap file] "
                             "[--token raw|reversed]\n");
             return 2;
         }
     }
-    if (!nkeys) { keyfiles[0] = "../keys/prod.keys"; keyfiles[1] = "../keys/ldn.txt"; nkeys = 2; }
-    if (!ldn_keys_load(&keys, keyfiles, nkeys, "ldn_passphrase_scarlet_violet")) return 1;
+    if (!ldn_keys_load(&keys, dirs, ndirs, "scarlet_violet")) return 1;
     u8 chlist[16];
     int nch = 0;
     for (const char *p = chans; *p && nch < 16;) {
