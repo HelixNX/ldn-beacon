@@ -84,10 +84,13 @@ Data: the games' UDP (Pia) passes through unchanged. Addresses are translated: t
 beacon's room address; each remote member's room address <-> a 169.254.X.Y on the LDN network.
 
 
-## State (2026-11-07)
+## State (2026-11-11)
 
 - **Room hosts, Switch joins: works.** S3 run 12: three complete Tera raids, a real Switch joining the recomp's,
-  no drops (the user: "Game is working very well"); Union Circle works (run 8). Not tried yet: a trade.
+  no drops (the user: "Game is working very well"); Union Circle works (run 8); link trades work (2026-11-11). A
+  host tearing its network down (a link-code search hosts and scans in turns) is dropped at once on its DestroyNetwork
+  (recomp hosts send it to whoever scanned them), else after 2.5 s without a ScanResp (scans every 0.5 s): a Switch
+  joining a dead network gave up after ~515 ms. NOTES.md has the run.
 - The S3 hosts the network with its BSSID set to the room host's MAC and the room Connect carries the Switch's real
   MAC, so Pia's constant ids match on both sides (the host's id also rides inside the game's own zlib data); only
   IPs are rewritten. Linux / hostapd cannot change its BSSID per network: there the ids still differ.

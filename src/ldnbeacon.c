@@ -76,6 +76,14 @@ static int probes_sent;
 
 static void on_ldn(const RoomLdn *p, void *ud) {
     (void)ud;
+    /* the host tore its network down (a recomp host tells whoever scanned it): off the air at once, before a Switch
+     * joins a network nobody answers for (a link-code search hosts and scans in turns) */
+    if (p->type == LDN_DESTROY_NETWORK && net.have && !memcmp(net.host_ip, p->local_ip, 4)) {
+        logf_(0, "network of " IP_FMT " destroyed by its host: off the air", IP_ARG(net.host_ip));
+        sta.active = sta.in_room = false;
+        net.have = false;
+        return;
+    }
     if ((p->type != LDN_SCAN_RESP && p->type != LDN_SYNC_NETWORK) || p->size < sizeof(LdnNetworkInfo)) {
         logf_(2, "room: ldn %s from " IP_FMT, ldn_type_name(p->type), IP_ARG(p->local_ip));
         return;
@@ -747,7 +755,7 @@ int main(int argc, char **argv) {
 #endif
 
         t = now_ms();
-        if (t - last_scan >= 1000) {                        /* ask the room who hosts */
+        if (t - last_scan >= 500) {                         /* ask the room who hosts */
             last_scan = t;
             RoomLdn p = {.type = LDN_SCAN, .broadcast = true};
             memcpy(p.local_ip, room_ip(), 4);
@@ -757,8 +765,9 @@ int main(int argc, char **argv) {
             send_arp_probe(probes_sent == 0);
             probes_sent++;
         }
-        if (net.have && t - net.seen_ms > 5000) {
-            logf_(0, "network of " IP_FMT " gone (no answer for 5 s): off the air", IP_ARG(net.host_ip));
+        /* hosts that don't send DestroyNetwork (Eden, older recomps): five missed scans */
+        if (net.have && t - net.seen_ms > 2500) {
+            logf_(0, "network of " IP_FMT " gone (no answer for 2.5 s): off the air", IP_ARG(net.host_ip));
             sta.active = sta.in_room = false;
             net.have = false;
         }

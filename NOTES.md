@@ -439,3 +439,14 @@ Violet 4.0.0's `main` .rodata. ldnkeys.c holds only SHA-256 hashes and scans eve
 printable string of the length (the game's). Checked: every derived key and constant equal to ldn.txt's; advdump
 decodes all 278 advertisements of `captures/20261107-032045-vif/ch11.pcap`. If a later firmware moves a constant to
 another module, add the module's program id to `fw_programs`.
+
+## Link trades and torn-down networks (2026-11-11)
+
+Link-code trades with the Violet recomp hosting work. A search hosts and scans in turns, so the host's network comes and
+goes every few seconds. The beacon kept a gone network on the air until 5 s without a ScanResp: the Switch joined it,
+the host ignored the Connect (it was scanning) and the Switch deauthenticated (reason 3) ~515 ms after our
+authentication response; one to four such drops before a join landed while the host was really up. Now the beacon
+drops the network on the host's DestroyNetwork (nxrecomp's ldn_net.c sends it to everyone who scanned it in the last
+10 s, not as a broadcast) and otherwise after 2.5 s without a ScanResp (scans every 0.5 s). Next trade: the first join
+stayed, 1 s after the network went up; the remaining wait (~9 s) is the search itself.
+
